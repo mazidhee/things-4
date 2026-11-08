@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="300" viewBox="0 0 880 300" role="img" aria-label="An AI agent adds a Learn Rust project to Things 4 over MCP, then checks what was finished">
+  <defs>
+    <clipPath id="term"><rect x="33" y="33" width="438" height="234" rx="13"/></clipPath>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#16181D"/><stop offset="1" stop-color="#1F2430"/></linearGradient>
+    <style>
+      .m { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; } .s { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+      @keyframes t2 { 0%,24% { opacity:0; transform:translateY(4px);} 26%,93% { opacity:1; transform:none;} 97%,100% { opacity:0;} }
+      @keyframes t3 { 0%,28% { opacity:0; transform:translateY(4px);} 30%,93% { opacity:1; transform:none;} 97%,100% { opacity:0;} }
+      @keyframes t4 { 0%,34% { opacity:0; transform:translateY(4px);} 36%,93% { opacity:1; transform:none;} 97%,100% { opacity:0;} }
+      @keyframes t5 { 0%,66% { opacity:0; transform:translateY(4px);} 68%,93% { opacity:1; transform:none;} 97%,100% { opacity:0;} }
+      @keyframes t6 { 0%,70% { opacity:0; transform:translateY(4px);} 72%,93% { opacity:1; transform:none;} 97%,100% { opacity:0;} }
+      @keyframes t7 { 0%,76% { opacity:0; transform:translateY(4px);} 78%,93% { opacity:1; transform:none;} 97%,100% { opacity:0;} }
+      @keyframes p0 { 0%,33% { opacity:0; transform:translateY(4px);} 35%,93% { opacity:1; transform:none;} 97%,100% { opacity:0;} }
+      @keyframes p1 { 0%,36% { opacity:0; transform:translateY(4px);} 38%,93% { opacity:1; transform:none;} 97%,100% { opacity:0;} }
+      @keyframes p2 { 0%,39% { opacity:0; transform:translateY(4px);} 41%,93% { opacity:1; transform:none;} 97%,100% { opacity:0;} }
+      @keyframes p3 { 0%,42% { opacity:0; transform:translateY(4px);} 44%,93% { opacity:1; transform:none;} 97%,100% { opacity:0;} }
+      @keyframes p4 { 0%,45% { opacity:0; transform:translateY(4px);} 47%,93% { opacity:1; transform:none;} 97%,100% { opacity:0;} }
+      .a { opacity:0; animation-duration:10s; animation-iteration-count:infinite; animation-timing-function:ease-out; }
+      .t2 { animation-name:t2; }
+      .t3 { animation-name:t3; }
+      .t4 { animation-name:t4; }
+      .t5 { animation-name:t5; }
+      .t6 { animation-name:t6; }
+      .t7 { animation-name:t7; }
+      .p0 { animation-name:p0; }
+      .p1 { animation-name:p1; }
+      .p2 { animation-name:p2; }
+      .p3 { animation-name:p3; }
+      .p4 { animation-name:p4; }
+      .cover { animation: type 10s steps(33) infinite; }
+      @keyframes type { 0%,3% { transform: translateX(0); } 20%,100% { transform: translateX(258px); } }
+      .caret { animation: caret 10s steps(33) infinite, blink 1s steps(1) infinite; }
+      @keyframes caret { 0%,3% { transform: translateX(0); } 20%,100% { transform: translateX(258px); } }
+      @keyframes blink { 50% { opacity: 0; } }
+      .box { animation: box 10s infinite; }
+      .mark { animation: mark 10s infinite; }
+      .done { animation: done 10s infinite; }
+      .strike { transform-box: fill-box; transform-origin: left; animation: strike 10s infinite; }
+      .ring { animation: ring 10s infinite; }
+      @keyframes box { 0%,58% { fill: transparent; stroke: #5B6070; } 60%,93% { fill: #3B82F6; stroke: #3B82F6; } 97%,100% { fill: transparent; stroke: #5B6070; } }
+      @keyframes mark { 0%,59% { stroke-dashoffset: 16; } 62%,93% { stroke-dashoffset: 0; } 97%,100% { stroke-dashoffset: 16; } }
+      @keyframes done { 0%,60% { fill: #E8EAF0; } 62%,93% { fill: #6B7080; } 97%,100% { fill: #E8EAF0; } }
+      @keyframes strike { 0%,60% { transform: scaleX(0); } 63%,93% { transform: scaleX(1); } 97%,100% { transform: scaleX(0); } }
+      @keyframes ring { 0%,60% { stroke-dashoffset: 50.3; } 63%,93% { stroke-dashoffset: 37.7; } 97%,100% { stroke-dashoffset: 50.3; } }
+      @media (prefers-reduced-motion: reduce) { * { animation: none !important; opacity: 1 !important; } .cover, .caret { display: none; } }
+    </style>
+  </defs>
+  <rect width="880" height="300" rx="24" fill="url(#bg)"/>
+  <rect x=".5" y=".5" width="879" height="299" rx="23.5" fill="none" stroke="#FFFFFF" stroke-opacity=".08"/>
+
+  <!-- Agent terminal -->
+  <rect x="32" y="32" width="440" height="236" rx="14" fill="#0E1015" stroke="#FFFFFF" stroke-opacity=".07"/>
+  <circle cx="54" cy="52" r="5.5" fill="#FF5F57"/><circle cx="72" cy="52" r="5.5" fill="#FEBC2E"/><circle cx="90" cy="52" r="5.5" fill="#28C840"/>
+  <text class="s" x="252" y="56.5" font-size="12" fill="#6B7080" text-anchor="middle">learning-agent</text>
+
+  <text class="m" x="52" y="96" font-size="13" fill="#E8EAF0"><tspan fill="#C792EA">›</tspan> I'm learning Rust. Plan my week.</text>
+  <g clip-path="url(#term)"><rect class="cover" x="66" y="82" width="400" height="20" fill="#0E1015"/></g>
+  <rect class="caret" x="66" y="84" width="7.5" height="15" fill="#4A9DFF"/>
+
+  <text class="m a t2" x="52" y="128" font-size="13" fill="#4A9DFF">● things4.add_project</text>
+  <text class="m a t3" x="68" y="149" font-size="12.5" fill="#9AA0AE">"Learn Rust" · 4 to-dos · 🔔 9:00</text>
+  <text class="m a t4" x="52" y="172" font-size="13" fill="#3DD68C">✓ Added to Things 4</text>
+  <text class="m a t5" x="52" y="204" font-size="13" fill="#4A9DFF">● things4.search_todos</text>
+  <text class="m a t6" x="68" y="225" font-size="12.5" fill="#9AA0AE">completed_since: today</text>
+  <text class="m a t7" x="52" y="248" font-size="13" fill="#3DD68C">✓ 1 done · next up: Ownership</text>
+
+  <!-- Things 4 project -->
+  <rect x="500" y="32" width="348" height="236" rx="14" fill="#23262E" stroke="#FFFFFF" stroke-opacity=".07"/>
+  <g class="a p0">
+    <circle cx="530" cy="70" r="8" fill="none" stroke="#3B4150" stroke-width="2.2"/>
+    <circle class="ring" cx="530" cy="70" r="8" fill="none" stroke="#4A9DFF" stroke-width="2.2" stroke-dasharray="50.3" stroke-dashoffset="50.3" transform="rotate(-90 530 70)"/>
+    <text class="s" x="548" y="77" font-size="19" font-weight="700" fill="#F5F6FA">Learn Rust</text>
+    <text class="s" x="522" y="106" font-size="11.5" font-weight="600" fill="#4A9DFF" letter-spacing=".4">WEEK 1</text>
+    <rect x="522" y="112" width="304" height="1" fill="#3B4150"/>
+  </g>
+  
+  <g class="a p1">
+    <rect class="box" x="522" y="126" width="16" height="16" rx="4" fill="transparent" stroke="#5B6070" stroke-width="1.5"/>
+    <path class="mark" d="M526 134 l3 3 l6 -6.5" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="16" stroke-dashoffset="16"/>
+    <text class="s done" x="550" y="139" font-size="14" fill="#E8EAF0">Install rustup and cargo</text>
+    <rect class="strike" x="550" y="133" width="140" height="1.6" fill="#6B7080" transform="scale(0 1)"/>
+    <text class="s" x="826" y="139" font-size="11.5" fill="#F7C548" text-anchor="end">Today</text>
+  </g>
+  <g class="a p2">
+    <rect class="" x="522" y="160" width="16" height="16" rx="4" fill="transparent" stroke="#5B6070" stroke-width="1.5"/>
+    
+    <text class="s" x="550" y="173" font-size="14" fill="#E8EAF0">Read chapter 4: ownership</text>
+    
+    <text class="s" x="826" y="173" font-size="11.5" fill="#4A9DFF" text-anchor="end">🔔 9:00</text>
+  </g>
+  <g class="a p3">
+    <rect class="" x="522" y="194" width="16" height="16" rx="4" fill="transparent" stroke="#5B6070" stroke-width="1.5"/>
+    
+    <text class="s" x="550" y="207" font-size="14" fill="#E8EAF0">Borrowing exercises</text>
+    
+    <text class="s" x="826" y="207" font-size="11.5" fill="#9AA0AE" text-anchor="end">Tue</text>
+  </g>
+  <g class="a p4">
+    <rect class="" x="522" y="228" width="16" height="16" rx="4" fill="transparent" stroke="#5B6070" stroke-width="1.5"/>
+    
+    <text class="s" x="550" y="241" font-size="14" fill="#E8EAF0">Build a guessing game</text>
+    
+    <text class="s" x="826" y="241" font-size="11.5" fill="#E5484D" text-anchor="end">⚑ Fri</text>
+  </g>
+</svg>

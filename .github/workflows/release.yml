@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the v prefix, for example 1.0.3"
+        required: true
+        default: "1.0.3"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcodebuild -version
+
+      - name: Build DMG
+        run: |
+          chmod +x scripts/package.sh build.sh
+          ./scripts/package.sh "${{ inputs.version }}"
+
+      - name: Verify DMG
+        run: |
+          DMG=$(ls build/Things4-*.dmg | head -1)
+          hdiutil verify "$DMG"
+          ls -lh "$DMG"
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ inputs.version }}"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "Things 4 $TAG" --generate-notes
+          gh release upload "$TAG" build/Things4.dmg build/Things4-*.dmg build/Things4-*.dmg.sha256 --clobber

@@ -1,0 +1,9 @@
+.build/
+build/
+dist/
+.DS_Store
+*.dmg
+*.dmg.sha256
+
+# Cultured Code artwork copied from a locally installed Things 3 (personal use only, never commit)
+assets/
