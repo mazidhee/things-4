@@ -301,6 +301,11 @@ extension SearchListPopover {
                 rows.append(Row(title: project.title, symbol: "circle", color: Theme.accent,
                                 subtitle: project.areaID.flatMap { store.area($0)?.title }) { AppState.shared.selection = .project(project.id) })
             }
+            for idea in store.ideas where idea.title.lowercased().contains(q) {
+                rows.append(Row(title: idea.title, symbol: "lightbulb", color: Theme.idea, subtitle: idea.ideaStage.title) {
+                    NotificationCenter.default.post(name: .openTask, object: idea.id)
+                })
+            }
             for tag in store.allTags where tag.lowercased().contains(q) {
                 rows.append(Row(title: tag, symbol: "tag", color: Theme.secondary) { AppState.shared.selection = .tag(tag) })
             }

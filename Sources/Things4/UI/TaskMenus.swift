@@ -334,6 +334,17 @@ enum TaskMenus {
         if todos { menu.addItem(ClosureMenuItem("Tags…") { list.showTags(nil) }) }
         menu.addItem(ClosureMenuItem("Deadline…") { list.showDeadline(nil) })
         if todos { menu.addItem(ClosureMenuItem("Remind Me…") { list.showRemind(nil) }) }
+        if todos {
+            menu.addItem(.separator())
+            for (title, submenu) in [("Status", WorkflowMenus.status(for: ids, done: done)),
+                                     ("Priority", WorkflowMenus.priority(for: ids, done: done)),
+                                     ("Estimate", WorkflowMenus.estimate(for: ids, done: done))] {
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.submenu = submenu
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+        }
 
         let completeItem = NSMenuItem(title: "Complete", action: nil, keyEquivalent: "")
         let completeMenu = NSMenu()
@@ -363,6 +374,9 @@ enum TaskMenus {
             store.batch("Duplicate") { ids.forEach { store.duplicate($0) } }
             done()
         })
+        if items.count == 1, items[0].isTodo, items[0].isOpen, Plain.isInstalled {
+            menu.addItem(ClosureMenuItem("Focus in Plain") { Plain.focus(on: items[0]) })
+        }
         if items.count == 1, items[0].isTodo, items[0].isOpen {
             let focusItem = NSMenuItem(title: "Start Focus Timer", action: nil, keyEquivalent: "")
             let focusMenu = NSMenu()
@@ -453,5 +467,78 @@ enum TaskMenus {
         var date = Date().startOfDay.addingDays(1)
         while Calendar.current.component(.weekday, from: date) != weekday { date = date.addingDays(1) }
         return date
+    }
+}
+
+extension TaskMenus {
+    /// The focus sessions logged on a to-do, newest first, with a way to start another.
+    static func timeMenu(for task: TaskItem) -> NSMenu {
+        let menu = NSMenu()
+        if task.isOpen, task.isTodo {
+            if Plain.isInstalled { menu.addItem(ClosureMenuItem("Focus in Plain") { Plain.focus(on: task) }) }
+            menu.addItem(ClosureMenuItem("Start 25-Minute Focus Timer") { FocusTimer.shared.start(taskID: task.id, minutes: 25) })
+            menu.addItem(.separator())
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE d MMM, HH:mm"
+        let entries = TaskStore.shared.timeEntries(for: task.id)
+        for entry in entries.prefix(12) {
+            let item = NSMenuItem(title: "\(formatter.string(from: entry.start))  ·  \(Duration.text(seconds: entry.seconds))" + (entry.source.map { "  ·  " + $0 } ?? ""),
+                                  action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            if let note = entry.note, !note.isEmpty {
+                let noteItem = NSMenuItem(title: note, action: nil, keyEquivalent: "")
+                noteItem.isEnabled = false
+                sub.addItem(noteItem)
+            }
+            sub.addItem(ClosureMenuItem("Delete Entry") { TaskStore.shared.deleteTimeEntry(entry.id) })
+            item.submenu = sub
+            menu.addItem(item)
+        }
+        if entries.count > 12 {
+            let more = NSMenuItem(title: "\(entries.count - 12) older sessions", action: nil, keyEquivalent: "")
+            more.isEnabled = false
+            menu.addItem(more)
+        }
+        return menu
+    }
+}
+
+/// Plain, the companion focus app. It logs its sessions back through the API.
+enum Plain {
+    static let bundleID = "com.mazidhee.plain"
+
+    private static var checked: (Date, Bool)?
+
+    /// Asked for every row, so the Launch Services lookup is cached for a minute.
+    static var isInstalled: Bool {
+        if let checked, Date().timeIntervalSince(checked.0) < 60 { return checked.1 }
+        let found = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
+        checked = (Date(), found)
+        return found
+    }
+
+    /// Work → work, Learning → study, from a tag first, then the to-do's area.
+    static func category(for task: TaskItem) -> String? {
+        let known = ["study", "work", "exam", "reading"]
+        if let tag = task.tags.map({ $0.lowercased() }).first(where: known.contains) { return tag }
+        let store = TaskStore.shared
+        let areaID = task.areaID ?? task.projectID.flatMap { store.task($0)?.areaID }
+        guard let area = areaID.flatMap(store.area)?.title.lowercased() else { return nil }
+        if area.contains("work") { return "work" }
+        if ["learn", "study", "school", "uni"].contains(where: area.contains) { return "study" }
+        if area.contains("read") { return "reading" }
+        return nil
+    }
+
+    static func focus(on task: TaskItem, minutes: Int? = nil) {
+        var components = URLComponents()
+        components.scheme = "plain"
+        components.host = "start"
+        var query = [URLQueryItem(name: "task", value: task.id), URLQueryItem(name: "title", value: task.title)]
+        if let minutes { query.append(URLQueryItem(name: "minutes", value: String(minutes))) }
+        if let category = category(for: task) { query.append(URLQueryItem(name: "category", value: category)) }
+        components.queryItems = query
+        if let url = components.url { NSWorkspace.shared.open(url) }
     }
 }

@@ -26,12 +26,56 @@ enum AppearanceMode: String, CaseIterable {
     }
 }
 
+/// The palette used whenever the app is dark. Graphite is the original neutral grey.
+enum DarkTheme: String, CaseIterable {
+    case graphite, midnight, slate, espresso
+
+    var title: String {
+        switch self {
+        case .graphite: return "Graphite"
+        case .midnight: return "Midnight"
+        case .slate: return "Slate"
+        case .espresso: return "Espresso"
+        }
+    }
+
+    /// Read on every colour lookup, so it is kept in memory rather than in defaults.
+    static var current: DarkTheme = {
+        let raw = ProcessInfo.processInfo.environment["THINGS4_DARK_THEME"] ?? UserDefaults.standard.string(forKey: "pref.darkTheme") ?? ""
+        return DarkTheme(rawValue: raw) ?? .graphite
+    }()
+
+    /// Re-tints a neutral dark colour for this palette. Accents and tag colours are left alone.
+    func adapt(_ color: NSColor) -> NSColor {
+        guard self != .graphite, let srgb = color.usingColorSpace(.sRGB) else { return color }
+        let r = srgb.redComponent, g = srgb.greenComponent, b = srgb.blueComponent
+        guard max(r, g, b) - min(r, g, b) < 0.07 else { return color }
+        let value = (r + g + b) / 3
+        let surface = value < 0.4
+        let tint: (CGFloat, CGFloat, CGFloat)
+        switch self {
+        case .graphite:
+            return color
+        case .midnight:
+            // Near-black surfaces for OLED and late nights; text keeps its brightness.
+            guard surface else { return color }
+            let level = max(0, value * 0.9 - 0.10)
+            tint = (level, level, level * 1.05 + 0.004)
+        case .slate:
+            tint = surface ? (value * 0.62, value * 0.68, value * 0.86) : (value * 0.96, value * 0.975, min(1, value * 1.01))
+        case .espresso:
+            tint = surface ? (value * 0.80, value * 0.71, value * 0.62) : (value, value * 0.975, value * 0.93)
+        }
+        return NSColor(srgbRed: tint.0, green: tint.1, blue: tint.2, alpha: srgb.alphaComponent)
+    }
+}
+
 /// Non-AI preferences. AI provider settings live in `AISettings`.
 enum Preferences {
     private static let defaults = UserDefaults.standard
 
     static var appearance: AppearanceMode {
-        get { AppearanceMode(rawValue: defaults.string(forKey: "pref.appearance") ?? "") ?? .system }
+        get { AppearanceMode(rawValue: ProcessInfo.processInfo.environment["THINGS4_APPEARANCE"] ?? defaults.string(forKey: "pref.appearance") ?? "") ?? .system }
         set {
             defaults.set(newValue.rawValue, forKey: "pref.appearance")
             apply()
@@ -133,11 +177,13 @@ enum Preferences {
         set { defaults.set(Array(newValue), forKey: "pref.seenToday") }
     }
 
-    /// Mirror reminders into Apple Reminders so iPhone and Apple Watch alert too.
-    static var phoneReminders: Bool {
-        get { defaults.object(forKey: "pref.phoneReminders") as? Bool ?? true }
-        set { defaults.set(newValue, forKey: "pref.phoneReminders"); changed() }
+    /// Two-way sync with Apple Reminders (RemindersSync). Off until you turn it on.
+    static var remindersSync: Bool {
+        get { defaults.bool(forKey: "pref.remindersSync") }
+        set { defaults.set(newValue, forKey: "pref.remindersSync"); changed() }
     }
+
+    /// The list the old one-way mirror used; sync adopts it as "Anytime".
 
     static var phoneReminderListID: String? {
         get { defaults.string(forKey: "pref.phoneReminderList") }
@@ -165,11 +211,36 @@ enum Preferences {
         set { defaults.set(newValue, forKey: "pref.sidebarVisible") }
     }
 
+    static var darkTheme: DarkTheme {
+        get { DarkTheme.current }
+        set {
+            guard newValue != DarkTheme.current else { return }
+            defaults.set(newValue.rawValue, forKey: "pref.darkTheme")
+            DarkTheme.current = newValue
+            // Flip the appearance and back so every view re-resolves its colours.
+            let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            NSApp.appearance = NSAppearance(named: dark ? .aqua : .darkAqua)
+            apply()
+            for window in NSApp.windows {
+                window.contentView?.setNeedsDisplayDeep()
+                window.invalidateShadow()
+            }
+            changed()
+        }
+    }
+
     static func apply() {
         NSApp.appearance = appearance.appearance
     }
 
     private static func changed() {
         NotificationCenter.default.post(name: .preferencesChanged, object: nil)
+    }
+}
+
+extension NSView {
+    func setNeedsDisplayDeep() {
+        needsDisplay = true
+        subviews.forEach { $0.setNeedsDisplayDeep() }
     }
 }

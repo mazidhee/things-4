@@ -32,6 +32,8 @@ final class NotePageViewController: NSViewController, NSTextViewDelegate {
     private let document = FlippedView()
     private let checkbox = CheckboxView()
     private let ring = ProgressRing()
+    private let ideaIcon = NSImageView()
+    private var promoteBar: IdeaPromoteBar?
     private let titleView = TitleTextView()
     private var propertyRows: [PropertyRow] = []
     private let divider = FillView(fill: Theme.separator)
@@ -94,7 +96,9 @@ final class NotePageViewController: NSViewController, NSTextViewDelegate {
         preview.isHidden = true
 
         footer.alignment = .right
-        [checkbox, ring, titleView, divider, body, preview].forEach(document.addSubview)
+        ideaIcon.image = NSImage.symbol("lightbulb.fill", size: 17, weight: .medium, color: Theme.idea)
+        ideaIcon.imageScaling = .scaleProportionallyUpOrDown
+        [checkbox, ring, ideaIcon, titleView, divider, body, preview].forEach(document.addSubview)
         root.addSubview(footer)
 
         NotificationCenter.default.addObserver(self, selector: #selector(storeChanged), name: .storeDidChange, object: nil)
@@ -131,12 +135,18 @@ final class NotePageViewController: NSViewController, NSTextViewDelegate {
         let titleHeight = titleView.fittingHeight(width: width - titleIndent)
         checkbox.frame = NSRect(x: x, y: y + 13, width: 18, height: 18)
         ring.frame = NSRect(x: x - 2, y: y + 10, width: 24, height: 24)
+        ideaIcon.frame = NSRect(x: x - 1, y: y + 11, width: 20, height: 22)
         titleView.frame = NSRect(x: x + titleIndent, y: y, width: width - titleIndent, height: titleHeight)
         y += titleHeight + 18
 
         for row in propertyRows {
             row.frame = NSRect(x: x - 6, y: y, width: width + 12, height: 32)
             y += 32
+        }
+        if let promoteBar {
+            y += 16
+            promoteBar.frame = NSRect(x: x, y: y, width: width, height: IdeaPromoteBar.height)
+            y += IdeaPromoteBar.height + 6
         }
         y += 14
         divider.frame = NSRect(x: x, y: y, width: width, height: 1)
@@ -172,7 +182,7 @@ final class NotePageViewController: NSViewController, NSTextViewDelegate {
     func focusInitial() {
         view.layoutSubtreeIfNeeded()
         guard let task else { return }
-        if task.title == "New To-Do" || task.title.isEmpty {
+        if task.title == "New To-Do" || task.title == "New Idea" || task.title.isEmpty {
             view.window?.makeFirstResponder(titleView)
             titleView.selectAll(nil)
         } else {
@@ -184,8 +194,9 @@ final class NotePageViewController: NSViewController, NSTextViewDelegate {
     private func refresh() {
         guard let task else { return }
         let store = TaskStore.shared
-        checkbox.isHidden = task.isProject
+        checkbox.isHidden = task.isProject || task.isIdea
         ring.isHidden = !task.isProject
+        ideaIcon.isHidden = !task.isIdea
         checkbox.isChecked = task.isCompleted
         checkbox.isCanceled = task.isCanceled
         if task.isProject {
@@ -196,6 +207,7 @@ final class NotePageViewController: NSViewController, NSTextViewDelegate {
         var crumbs: [String] = []
         if let areaID = task.areaID, let area = store.area(areaID) { crumbs.append(area.title) }
         if let projectID = task.projectID, let project = store.task(projectID) { crumbs.append(project.title) }
+        if task.isIdea { crumbs = ["Ideas"] }
         if crumbs.isEmpty { crumbs.append(task.isProject ? "Projects" : (task.bucket == .inbox ? "Inbox" : "To-Dos")) }
         crumbs.append(task.title.isEmpty ? "Untitled" : task.title)
         breadcrumb.stringValue = crumbs.joined(separator: "  /  ")
@@ -203,6 +215,13 @@ final class NotePageViewController: NSViewController, NSTextViewDelegate {
         propertyRows.forEach { $0.removeFromSuperview() }
         propertyRows = buildProperties(for: task)
         propertyRows.forEach(document.addSubview)
+        promoteBar?.removeFromSuperview()
+        promoteBar = nil
+        if task.isIdea && task.isOpen {
+            let bar = IdeaPromoteBar(ideaID: task.id)
+            document.addSubview(bar)
+            promoteBar = bar
+        }
 
         let words = body.string.split { $0.isWhitespace || $0.isNewline }.count
         let edited = task.modifiedAt.isToday
@@ -216,6 +235,7 @@ final class NotePageViewController: NSViewController, NSTextViewDelegate {
         let store = TaskStore.shared
         var rows: [PropertyRow] = []
         let timeFormatter = DateFormatter(); timeFormatter.timeStyle = .short
+        if task.isIdea { return ideaProperties(for: task) }
         if !task.isProject || true {
             let when: (String, NSColor)? = {
                 if task.isEvening { return ("This Evening", Theme.text) }
@@ -254,6 +274,26 @@ final class NotePageViewController: NSViewController, NSTextViewDelegate {
                 TaskMenus.showRepeat(for: [id]) { self?.refresh() }
             })
         }
+        return rows
+    }
+
+    /// An idea has no dates: just how far along it is, where it would live, and tags.
+    private func ideaProperties(for idea: TaskItem) -> [PropertyRow] {
+        let store = TaskStore.shared
+        var rows: [PropertyRow] = []
+        rows.append(PropertyRow(symbol: "circle.dashed", label: "Stage", value: idea.ideaStage.title,
+                                valueColor: Theme.ideaStageColor(idea.ideaStage)) { row in
+            IdeaActions.stageMenu(for: idea.id).popUp(positioning: nil, at: NSPoint(x: row.valueRect.minX, y: row.bounds.height), in: row)
+        })
+        rows.append(PropertyRow(symbol: "things.area.plain", label: "Area", value: idea.areaID.flatMap { store.area($0)?.title },
+                                valueColor: Theme.text) { row in
+            IdeaActions.areaMenu(for: idea.id).popUp(positioning: nil, at: NSPoint(x: row.valueRect.minX, y: row.bounds.height), in: row)
+        })
+        rows.append(PropertyRow(symbol: "tag", label: "Tags", value: idea.tags.isEmpty ? nil : idea.tags.joined(separator: ", "),
+                                valueColor: Theme.text) { [weak self] row in
+            guard let self, let id = self.taskID else { return }
+            SearchListPopover.show(.tags(ids: [id]) { [weak self] in self?.refresh() }, relativeTo: row.valueRect, of: row)
+        })
         return rows
     }
 
@@ -326,7 +366,9 @@ final class NotePageViewController: NSViewController, NSTextViewDelegate {
 
     @objc private func showMore() {
         guard let id = taskID else { return }
-        let menu = TaskMenus.context(for: [id], selection: state.selection) { [weak self] in self?.refresh() }
+        let menu = TaskStore.shared.task(id)?.isIdea == true
+            ? IdeaActions.contextMenu(for: id)
+            : TaskMenus.context(for: [id], selection: state.selection) { [weak self] in self?.refresh() }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: moreButton.bounds.height + 4), in: moreButton)
     }
 

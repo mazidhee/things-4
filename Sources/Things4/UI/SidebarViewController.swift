@@ -219,7 +219,7 @@ final class SidebarViewController: NSViewController {
         }
         // Things: the red badge counts overdue/due-today items, the grey number the rest.
         let shown = list == .today ? count - badge : count
-        let showCount = (list == .inbox || list == .today || list == .trash) && shown > 0
+        let showCount = (list == .inbox || list == .today || list == .trash || list == .active) && shown > 0
         let row = SidebarRowView(title: list.title, symbol: list.symbol, color: Theme.listColor(list),
                                  count: showCount ? shown : nil, badge: badge)
         row.isSelectedRow = state.selection == .builtin(list)
@@ -254,6 +254,7 @@ final class SidebarViewController: NSViewController {
                         case .upcoming: store.setBucket(id, bucket: .scheduled, date: Date().startOfDay.addingDays(1))
                         case .anytime: store.setBucket(id, bucket: .anytime)
                         case .someday: store.setBucket(id, bucket: .someday)
+                        case .active: store.setStage(id, .progress)
                         default: break
                         }
                     }
@@ -271,7 +272,7 @@ final class SidebarViewController: NSViewController {
 
         addRow(listRow(.inbox), &y)
         y += 16
-        for list in [BuiltinList.today, .upcoming, .anytime, .someday] { addRow(listRow(list), &y) }
+        for list in [BuiltinList.today, .active, .upcoming, .anytime, .someday, .ideas] { addRow(listRow(list), &y) }
         y += 16
         addRow(listRow(.logbook), &y)
         // Things only lists the Trash while it has something in it.

@@ -24,6 +24,8 @@ final class TaskStore {
     private(set) var areas: [Area] = []
     /// Explicit tag colours chosen by the user (defaults come from TagColor.defaultColor).
     private(set) var tagColorMap: [String: TagColor] = [:]
+    /// Seconds of focus logged against each to-do (see `logTime`).
+    private(set) var trackedSeconds: [String: Int] = [:]
     /// Tags that exist without any to-do yet (created in the Tags window).
     private(set) var extraTags: Set<String> = []
 
@@ -159,6 +161,30 @@ final class TaskStore {
         if !columns.contains("reminder") {
             try? db.run("ALTER TABLE tasks ADD COLUMN reminder REAL;")
         }
+        if !columns.contains("stage") {
+            try? db.run("ALTER TABLE tasks ADD COLUMN stage TEXT NOT NULL DEFAULT 'todo';")
+            try? db.run("ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;")
+            try? db.run("ALTER TABLE tasks ADD COLUMN estimate INTEGER NOT NULL DEFAULT 0;")
+            try? db.run("ALTER TABLE tasks ADD COLUMN waiting_on TEXT;")
+            try? db.run("ALTER TABLE tasks ADD COLUMN blocked_by TEXT;")
+            // Someday to-dos start out as Backlog; everything else is Todo.
+            try? db.run("UPDATE tasks SET stage = 'backlog' WHERE type = 'todo' AND bucket = 'someday';")
+        }
+        if !columns.contains("idea_stage") {
+            try? db.run("ALTER TABLE tasks ADD COLUMN idea_stage TEXT;")
+        }
+        try? db.run("""
+        CREATE TABLE IF NOT EXISTS time_entries (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            start REAL NOT NULL,
+            end REAL NOT NULL,
+            seconds INTEGER NOT NULL,
+            source TEXT,
+            note TEXT
+        );
+        """)
+        try? db.run("CREATE INDEX IF NOT EXISTS idx_time_task ON time_entries(task_id);")
     }
 
     // MARK: - Loading
@@ -176,6 +202,11 @@ final class TaskStore {
                         index: row["idx"] as? Int ?? 0,
                         createdAt: Date(timeIntervalSince1970: row["created"] as? Double ?? 0))
         } ?? []
+
+        trackedSeconds = [:]
+        for row in (try? db.query("SELECT task_id, SUM(seconds) AS total FROM time_entries GROUP BY task_id")) ?? [] {
+            if let taskID = row["task_id"] as? String { trackedSeconds[taskID] = row["total"] as? Int ?? 0 }
+        }
 
         let tagRows = (try? db.query("SELECT task_id, name FROM tags")) ?? []
         var tagsByTask: [String: [String]] = [:]
@@ -225,7 +256,13 @@ final class TaskStore {
                 checklist: (checklistByTask[id] ?? []).sorted { $0.index < $1.index },
                 isEvening: (row["evening"] as? Int ?? 0) == 1,
                 repeatRule: RepeatRule.decode(row["repeat_rule"] as? String),
-                reminder: (row["reminder"] as? Double).map { Date(timeIntervalSince1970: $0) }
+                reminder: (row["reminder"] as? Double).map { Date(timeIntervalSince1970: $0) },
+                stage: Stage(rawValue: row["stage"] as? String ?? "todo") ?? .todo,
+                priority: Priority(rawValue: row["priority"] as? Int ?? 0) ?? .none,
+                estimate: row["estimate"] as? Int ?? 0,
+                waitingOn: row["waiting_on"] as? String,
+                blockedBy: row["blocked_by"] as? String,
+                ideaStage: IdeaStage(rawValue: row["idea_stage"] as? String ?? "") ?? .raw
             )
         } ?? []
     }
@@ -237,22 +274,26 @@ final class TaskStore {
             try db.run("""
         INSERT INTO tasks (id, type, title, notes, status, bucket, start_date, deadline,
                            project_id, area_id, heading_id, idx, created, modified, completed_at,
-                           evening, repeat_rule, reminder)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           evening, repeat_rule, reminder, stage, priority, estimate, waiting_on, blocked_by, idea_stage)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             type=excluded.type, title=excluded.title, notes=excluded.notes, status=excluded.status,
             bucket=excluded.bucket, start_date=excluded.start_date, deadline=excluded.deadline,
             project_id=excluded.project_id, area_id=excluded.area_id, heading_id=excluded.heading_id,
             idx=excluded.idx, created=excluded.created, modified=excluded.modified,
             completed_at=excluded.completed_at, evening=excluded.evening, repeat_rule=excluded.repeat_rule,
-            reminder=excluded.reminder;
+            reminder=excluded.reminder, stage=excluded.stage, priority=excluded.priority,
+            estimate=excluded.estimate, waiting_on=excluded.waiting_on, blocked_by=excluded.blocked_by,
+            idea_stage=excluded.idea_stage;
         """, [
             task.id, task.type.rawValue, task.title, task.notes, task.status.rawValue,
             task.bucket.rawValue, task.startDate?.timeIntervalSince1970, task.deadline?.timeIntervalSince1970,
             task.projectID, task.areaID, task.headingID, task.index,
             task.createdAt.timeIntervalSince1970, task.modifiedAt.timeIntervalSince1970,
             task.completedAt?.timeIntervalSince1970,
-            task.isEvening ? 1 : 0, task.repeatRule?.encoded, task.reminder?.timeIntervalSince1970
+            task.isEvening ? 1 : 0, task.repeatRule?.encoded, task.reminder?.timeIntervalSince1970,
+            task.stage.rawValue, task.priority.rawValue, task.estimate, task.waitingOn, task.blockedBy,
+            task.isIdea ? task.ideaStage.rawValue : nil
             ])
         } catch {
             NSLog("Things 4 persist failed: \(error.localizedDescription)")
@@ -401,6 +442,92 @@ final class TaskStore {
         )
         insert(task, actionName: "New Project")
         return task
+    }
+
+    // MARK: - Ideas
+
+    @discardableResult
+    func createIdea(title: String, notes: String = "", areaID: String? = nil, stage: IdeaStage = .raw) -> TaskItem {
+        let now = Date()
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        var idea = TaskItem(
+            id: TaskItem.newID(), type: .idea, title: trimmed.isEmpty ? "New Idea" : trimmed,
+            notes: notes, status: .open, bucket: .someday, startDate: nil, deadline: nil,
+            projectID: nil, areaID: areaID, headingID: nil, index: (ideas.map(\.index).max() ?? -1) + 1,
+            createdAt: now, modifiedAt: now, completedAt: nil, tags: [], checklist: []
+        )
+        idea.ideaStage = stage
+        insert(idea, actionName: "New Idea")
+        return idea
+    }
+
+    /// Open ideas, most recently touched first.
+    var ideas: [TaskItem] {
+        tasks.filter { $0.isIdea && $0.isOpen }.sorted { $0.modifiedAt > $1.modifiedAt }
+    }
+
+    func setIdeaStage(_ id: String, _ stage: IdeaStage) {
+        guard var idea = task(id), idea.isIdea, idea.ideaStage != stage else { return }
+        idea.ideaStage = stage
+        commit(idea, actionName: "Set Stage")
+    }
+
+    /// Turns an idea into a project. Open checkboxes in its notes (`- [ ] …`) become
+    /// the project's to-dos and leave the notes; everything else stays as the project's notes.
+    /// Starting now makes the project Active and plans its first to-do for today;
+    /// otherwise it goes to Someday as Planned.
+    @discardableResult
+    func promoteIdea(_ id: String, startNow: Bool) -> TaskItem? {
+        guard var project = task(id), project.isIdea else { return nil }
+        let (notes, steps) = Self.extractSteps(from: project.notes)
+        batch(startNow ? "Start Project" : "Move to Someday") {
+            project.type = .project
+            project.notes = notes
+            project.bucket = startNow ? .anytime : .someday
+            project.stage = startNow ? .todo : .backlog
+            project.index = (tasks.filter { $0.isProject && $0.areaID == project.areaID }.map(\.index).max() ?? -1) + 1
+            commit(project, actionName: startNow ? "Start Project" : "Move to Someday")
+            for (position, step) in steps.enumerated() {
+                let first = startNow && position == 0
+                createTask(title: step, bucket: first ? .scheduled : (startNow ? .anytime : .someday),
+                           startDate: first ? Date().startOfDay : nil, projectID: project.id, areaID: project.areaID)
+            }
+        }
+        return task(id)
+    }
+
+    /// Splits `- [ ] step` lines out of Markdown notes.
+    static func extractSteps(from notes: String) -> (notes: String, steps: [String]) {
+        var kept: [String] = []
+        var steps: [String] = []
+        for line in notes.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if let range = ["- [ ] ", "* [ ] ", "- [] "].lazy.compactMap({ trimmed.hasPrefix($0) ? $0.count : nil }).first {
+                let step = String(trimmed.dropFirst(range)).trimmingCharacters(in: .whitespaces)
+                if !step.isEmpty { steps.append(step); continue }
+            }
+            kept.append(line)
+        }
+        // Collapse the blank runs left where a checklist used to be.
+        var result: [String] = []
+        for line in kept where !(line.trimmingCharacters(in: .whitespaces).isEmpty && (result.last?.trimmingCharacters(in: .whitespaces).isEmpty ?? true)) {
+            result.append(line)
+        }
+        while result.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { result.removeLast() }
+        return (result.joined(separator: "\n"), steps)
+    }
+
+    /// An idea as a prompt for a research chat with Claude.
+    func ideaPrompt(_ id: String) -> String {
+        guard let idea = task(id) else { return "" }
+        var text = "I'm thinking about a project idea and would like help researching it.\n\n# \(idea.title)\n"
+        if let areaID = idea.areaID, let area = area(areaID) { text += "\nArea of my life: \(area.title)\n" }
+        text += "Stage: \(idea.ideaStage.title)\n"
+        let notes = idea.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        text += notes.isEmpty ? "\nNo notes yet.\n" : "\n## My notes so far\n\n\(notes)\n"
+        text += "\nHelp me work out whether and how to do this: open questions, prior art, a rough plan, and the first concrete steps. "
+        text += "Write the steps as a Markdown checklist (- [ ] step) so I can paste them back; they become to-dos when I start the project."
+        return text
     }
 
     /// A heading (section) inside a project, or directly inside an area.
@@ -589,8 +716,116 @@ final class TaskStore {
         guard var task = task(id), task.isCompleted else { return }
         task.status = .open
         task.completedAt = nil
+        if task.stage == .waiting && task.waitingOn == nil && task.blockedBy == nil { task.stage = .todo }
         commit(task, actionName: "Reopen")
     }
+
+    // MARK: - Day plan
+
+    private var plannedIDs: Set<String> = []
+    private var plannedDay: Date?
+    private var plannedLoaded = false
+    /// A scratch database (tests, snapshots) never touches the saved plan.
+    private let persistsPlan = ProcessInfo.processInfo.environment["THINGS4_DB"] == nil
+
+    /// The to-dos today's plan put first. Forgotten when the day rolls over.
+    var plannedToday: Set<String> {
+        if !plannedLoaded {
+            plannedLoaded = true
+            if persistsPlan, let parts = UserDefaults.standard.string(forKey: "plan.today")?.split(separator: "|", maxSplits: 1).map(String.init), parts.count == 2 {
+                plannedDay = Date.fromISO(parts[0])
+                plannedIDs = Set(parts[1].split(separator: ",").map(String.init))
+            }
+        }
+        return plannedDay == Date().startOfDay ? plannedIDs : []
+    }
+
+    func setPlannedToday(_ ids: [String]) {
+        plannedLoaded = true
+        plannedDay = Date().startOfDay
+        plannedIDs = Set(ids)
+        if persistsPlan { UserDefaults.standard.set(Date().startOfDay.isoString + "|" + ids.joined(separator: ","), forKey: "plan.today") }
+        notifyStoreChange()
+    }
+
+    // MARK: - Workflow
+
+    /// Moves to-dos through the six statuses. Done and Canceled go through the
+    /// usual completion path so repeats, the Logbook and undo behave the same.
+    func setFlow(_ id: String, _ flow: Flow) {
+        guard let task = task(id), task.status != .trashed, task.flow != flow else { return }
+        guard let stage = flow.stage else {
+            batch(flow == .canceled ? "Cancel" : "Complete") {
+                if task.isCompleted { reopen(id) }
+                complete(id, status: flow == .canceled ? .canceled : .completed)
+            }
+            return
+        }
+        batch("Set Status") {
+            if task.isCompleted { reopen(id) }
+            setStage(id, stage)
+        }
+    }
+
+    func setStage(_ id: String, _ stage: Stage) {
+        guard var task = task(id), task.stage != stage else { return }
+        if task.stage == .waiting {
+            task.waitingOn = nil
+            task.blockedBy = nil
+        }
+        task.stage = stage
+        // Starting a to-do plans it for today.
+        if stage == .progress, task.isTodo, task.isOpen, !task.isDueToday,
+           task.bucket != .scheduled || task.startDate == nil {
+            task.bucket = .scheduled
+            task.startDate = Date().startOfDay
+        }
+        commit(task, actionName: "Set Status")
+    }
+
+    func setPriority(_ id: String, _ priority: Priority) {
+        guard var task = task(id), task.priority != priority else { return }
+        task.priority = priority
+        commit(task, actionName: "Set Priority")
+    }
+
+    func setEstimate(_ id: String, minutes: Int) {
+        guard var task = task(id), task.estimate != max(0, minutes) else { return }
+        task.estimate = max(0, minutes)
+        commit(task, actionName: "Set Estimate")
+    }
+
+    /// Marks a to-do as Waiting on a person or thing (`on`) or on another to-do (`blockedBy`).
+    func setWaiting(_ id: String, on text: String? = nil, blockedBy: String? = nil) {
+        guard var task = task(id), blockedBy != id else { return }
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        task.stage = .waiting
+        task.waitingOn = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        task.blockedBy = blockedBy.flatMap { self.task($0)?.isOpen == true ? $0 : nil }
+        commit(task, actionName: "Set Waiting")
+    }
+
+    /// "Waiting on Henry" or "Blocked by Demo video"; nil when there is nothing to say.
+    func waitingLabel(_ task: TaskItem) -> String? {
+        guard task.isOpen, task.stage == .waiting else { return nil }
+        if let blocker = task.blockedBy.flatMap({ self.task($0) }), blocker.isOpen { return "Blocked by " + blocker.title }
+        if let on = task.waitingOn, !on.isEmpty { return "Waiting on " + on }
+        return nil
+    }
+
+    /// Every to-do in an area, including the ones inside its projects.
+    func areaTodos(_ areaID: String) -> [TaskItem] {
+        let projectIDs = Set(projects(inArea: areaID).filter(\.isOpen).map(\.id))
+        return tasks.filter {
+            guard $0.isTodo, $0.status != .trashed else { return false }
+            if let projectID = $0.projectID { return projectIDs.contains(projectID) }
+            return $0.areaID == areaID
+        }.sorted { $0.index < $1.index }
+    }
+
+    /// Open to-do counts per status for a set of to-dos, plus estimate and focus totals.
+    func estimateTotal(_ items: [TaskItem]) -> Int { items.reduce(0) { $0 + $1.estimate } }
+    func trackedTotal(_ items: [TaskItem]) -> Int { items.reduce(0) { $0 + (trackedSeconds[$1.id] ?? 0) } }
 
     private func complete(_ id: String, status: TaskStatus) {
         guard var task = task(id) else { return }
@@ -598,6 +833,13 @@ final class TaskStore {
         task.completedAt = Date()
         batch(status == .canceled ? "Cancel" : "Complete") {
             commit(task, actionName: status == .canceled ? "Cancel" : "Complete")
+            // Finishing a to-do frees whatever was blocked by it.
+            for waiting in tasks where waiting.blockedBy == id && waiting.isOpen {
+                var freed = waiting
+                freed.blockedBy = nil
+                if freed.stage == .waiting && freed.waitingOn == nil { freed.stage = .todo }
+                commit(freed, actionName: "Unblock")
+            }
             if task.isProject {
                 for child in tasks where child.projectID == id && child.isOpen && child.isTodo {
                     var done = child
@@ -789,6 +1031,71 @@ final class TaskStore {
         notifyStoreChange()
     }
 
+    // MARK: - Time tracking
+
+    /// Logs focused time against a to-do, from the focus timer, Plain or the API.
+    @discardableResult
+    func logTime(_ taskID: String, seconds: Int, start: Date? = nil, end: Date? = nil, source: String? = nil,
+                 note: String? = nil, id: String = UUID().uuidString) -> TimeEntry? {
+        guard task(taskID) != nil, seconds > 0 else { return nil }
+        let finish = end ?? Date()
+        let entry = TimeEntry(id: id, taskID: taskID, start: start ?? finish.addingTimeInterval(TimeInterval(-seconds)),
+                              end: finish, seconds: seconds, source: source, note: note)
+        do {
+            try db.run("INSERT OR REPLACE INTO time_entries (id, task_id, start, end, seconds, source, note) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       [entry.id, taskID, entry.start.timeIntervalSince1970, entry.end.timeIntervalSince1970, seconds, source, note])
+        } catch {
+            NSLog("Things4: couldn't log time: \(error)")
+            return nil
+        }
+        pendingActionName = "Log Time"
+        registerStep { store in store.deleteTimeEntry(entry.id) }
+        trackedSeconds[taskID, default: 0] += seconds
+        notifyStoreChange()
+        return entry
+    }
+
+    func deleteTimeEntry(_ id: String) {
+        guard let entry = timeEntries(where: "id = ?", [id]).first else { return }
+        pendingActionName = "Delete Time"
+        registerStep { store in
+            store.logTime(entry.taskID, seconds: entry.seconds, start: entry.start, end: entry.end,
+                          source: entry.source, note: entry.note, id: entry.id)
+        }
+        try? db.run("DELETE FROM time_entries WHERE id = ?", [id])
+        trackedSeconds[entry.taskID] = max(0, (trackedSeconds[entry.taskID] ?? 0) - entry.seconds)
+        notifyStoreChange()
+    }
+
+    /// A to-do's own time; a project's includes its to-dos.
+    func trackedTime(_ id: String) -> Int {
+        guard let item = task(id) else { return 0 }
+        var total = trackedSeconds[id] ?? 0
+        if item.isProject {
+            for child in tasks where child.projectID == id { total += trackedSeconds[child.id] ?? 0 }
+        }
+        return total
+    }
+
+    func timeEntries(for taskID: String) -> [TimeEntry] {
+        timeEntries(where: "task_id = ?", [taskID])
+    }
+
+    func timeEntries(since: Date) -> [TimeEntry] {
+        timeEntries(where: "end >= ?", [since.timeIntervalSince1970])
+    }
+
+    private func timeEntries(where clause: String, _ params: [Any?]) -> [TimeEntry] {
+        ((try? db.query("SELECT * FROM time_entries WHERE \(clause) ORDER BY start DESC", params)) ?? []).compactMap { row in
+            guard let id = row["id"] as? String, let taskID = row["task_id"] as? String else { return nil }
+            return TimeEntry(id: id, taskID: taskID,
+                             start: Date(timeIntervalSince1970: row["start"] as? Double ?? 0),
+                             end: Date(timeIntervalSince1970: row["end"] as? Double ?? 0),
+                             seconds: row["seconds"] as? Int ?? 0,
+                             source: row["source"] as? String, note: row["note"] as? String)
+        }
+    }
+
     func emptyTrash() {
         batch("Empty Trash") {
             for item in tasks where item.status == .trashed {
@@ -958,8 +1265,13 @@ final class TaskStore {
 
             case .today:
                 let open = tasks.filter { $0.isOpen && $0.type == .todo && $0.isDueToday }
+                let planned = plannedToday
                 return open.sorted { first, second in
                     if first.isEvening != second.isEvening { return !first.isEvening }
+                    // What Plan My Day put at the top stays there, in the planned order.
+                    let firstPlanned = planned.contains(first.id), secondPlanned = planned.contains(second.id)
+                    if firstPlanned != secondPlanned { return firstPlanned }
+                    if firstPlanned { return first.index < second.index }
                     let firstOverdue = (first.deadline ?? .distantFuture) < now.startOfDay
                     let secondOverdue = (second.deadline ?? .distantFuture) < now.startOfDay
                     if firstOverdue != secondOverdue { return firstOverdue }
@@ -994,6 +1306,13 @@ final class TaskStore {
             case .trash:
                 return tasks.filter { $0.status == .trashed }
                     .sorted { $0.modifiedAt > $1.modifiedAt }
+
+            case .ideas:
+                return ideas
+
+            case .active:
+                return tasks.filter { $0.isOpen && $0.type == .todo && ($0.stage == .progress || $0.stage == .waiting) }
+                    .sorted { ($0.stage == .progress ? 0 : 1, $0.index) < ($1.stage == .progress ? 0 : 1, $1.index) }
             }
 
         case .project(let id):
@@ -1021,6 +1340,7 @@ final class TaskStore {
         case .area(let id): return done.filter { $0.areaID == id && $0.projectID == nil }.sorted { $0.index < $1.index }
         case .builtin(.inbox): return done.filter { $0.bucket == .inbox && $0.projectID == nil }
         case .builtin(.anytime): return done.filter { $0.bucket == .anytime && $0.startDate == nil }
+        case .builtin(.active): return done.filter { $0.stage == .progress || $0.stage == .waiting }
         default: return []
         }
     }
@@ -1059,6 +1379,7 @@ final class TaskStore {
 
     /// The sidebar list a to-do currently lives in, for "Show in list".
     func homeSelection(for task: TaskItem) -> Selection {
+        if task.isIdea && task.isOpen { return .builtin(.ideas) }
         if let projectID = task.projectID, self.task(projectID) != nil { return .project(projectID) }
         if let areaID = task.areaID, area(areaID) != nil { return .area(areaID) }
         if task.status == .trashed { return .builtin(.trash) }

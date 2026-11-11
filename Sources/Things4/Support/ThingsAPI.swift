@@ -231,6 +231,10 @@ enum ThingsAPI {
             for tag in tags { store.addTagName(tag) }
             when?.applyWhen(to: ids)
             if let reminder { for id in ids { store.setReminder(id, at: reminder) } }
+            if let priority = string(params, "priority").flatMap(Priority.named) { ids.forEach { store.setPriority($0, priority) } }
+            if let minutes = string(params, "estimate").flatMap(WorkflowMenus.parseMinutes) { ids.forEach { store.setEstimate($0, minutes: minutes) } }
+            if let on = string(params, "waiting-on"), !on.isEmpty { ids.forEach { store.setWaiting($0, on: on) } }
+            if let flow = string(params, "state").flatMap(Flow.named) { ids.forEach { store.setFlow($0, flow) } }
             if bool(params, "completed") == true { ids.forEach(store.toggleCompletion) }
             else if bool(params, "canceled") == true { ids.forEach(store.cancel) }
         }
@@ -294,6 +298,41 @@ enum ThingsAPI {
         return made.compactMap { store.task($0) }
     }
 
+    // MARK: - Ideas
+
+    /// `add-idea`: a page in Ideas with optional notes, area and stage (raw, researching, ready).
+    static func addIdea(_ raw: Params) throws -> TaskItem {
+        let params = normalize(raw)
+        guard let title = string(params, "title"), !title.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw Failure("An idea needs a title.")
+        }
+        let stage = try ideaStage(params) ?? .raw
+        let areaID = try area(string(params, "area-id") ?? string(params, "area"), create: true)
+        let source = Self.source(params)
+        let tags = tagged(strings(params, "tags", commas: true) ?? [], source)
+        var made: TaskItem?
+        store.batch("New Idea") {
+            let idea = store.createIdea(title: title, notes: string(params, "notes") ?? "", areaID: areaID, stage: stage)
+            if !tags.isEmpty { store.setTags(idea.id, tags); tags.forEach(store.addTagName) }
+            made = idea
+        }
+        return try item(made?.id ?? "")
+    }
+
+    static func ideaStage(_ params: Params) throws -> IdeaStage? {
+        try string(params, "stage").map { raw in
+            guard let stage = IdeaStage.named(raw) else { throw Failure("stage must be raw, researching or ready.") }
+            return stage
+        }
+    }
+
+    /// Promotes an idea to a project: Active now, or Planned in Someday.
+    static func startIdea(_ id: String, someday: Bool) throws -> TaskItem {
+        guard try item(id).isIdea else { throw Failure("Only an idea can be started; this is already a \(try item(id).isProject ? "project" : "to-do").") }
+        guard let project = store.promoteIdea(id, startNow: !someday) else { throw Failure("Could not start this idea.") }
+        return project
+    }
+
     /// `update`: change an existing to-do or project. Empty values clear (when, deadline, reminder).
     static func update(_ raw: Params) throws -> TaskItem {
         let params = normalize(raw)
@@ -305,6 +344,21 @@ enum ThingsAPI {
         let target = try (params["list-id"] != nil || params["list"] != nil)
             ? container(id: string(params, "list-id"), name: string(params, "list"), create: true, area: string(params, "area")) : nil
         let moveToInbox = string(params, "list")?.lowercased() == "inbox"
+        let priority = try string(params, "priority").map { raw -> Priority in
+            guard let value = Priority.named(raw) else { throw Failure("priority must be none, low, medium, high or urgent.") }
+            return value
+        }
+        let estimate = try string(params, "estimate").map { raw -> Int in
+            guard let value = raw.isEmpty ? 0 : WorkflowMenus.parseMinutes(raw) else { throw Failure("estimate is minutes (90) or hours (1.5h).") }
+            return value
+        }
+        let flow = try string(params, "state").map { raw -> Flow in
+            guard let value = Flow.named(raw) else { throw Failure("state must be backlog, todo, in-progress, waiting, done or canceled.") }
+            return value
+        }
+        let blocker = try string(params, "blocked-by").flatMap { $0.isEmpty ? nil : try item($0).id }
+        let ideaStage = try Self.ideaStage(params)
+        if ideaStage != nil && !task.isIdea { throw Failure("stage applies to ideas; use state for a to-do.") }
 
         store.batch("Update") {
             if let title = string(params, "title"), !title.isEmpty {
@@ -349,6 +403,19 @@ enum ThingsAPI {
             when?.applyWhen(to: [id])
             if let deadline { store.setDeadline(id, date: deadline) }
             if let reminder { store.setReminder(id, at: reminder) }
+
+            if let ideaStage { store.setIdeaStage(id, ideaStage) }
+            if let priority { store.setPriority(id, priority) }
+            if let estimate { store.setEstimate(id, minutes: estimate) }
+            if let flow { store.setFlow(id, flow) }
+            if params["waiting-on"] != nil || params["blocked-by"] != nil {
+                let on = string(params, "waiting-on")
+                if blocker == nil && (on ?? "").isEmpty {
+                    if store.task(id)?.stage == .waiting { store.setStage(id, .todo) }
+                } else {
+                    store.setWaiting(id, on: on, blockedBy: blocker)
+                }
+            }
 
             let current = store.task(id) ?? task
             if let completed = bool(params, "completed") {
@@ -409,6 +476,72 @@ enum ThingsAPI {
         return try item(id)
     }
 
+    // MARK: - Time
+
+    /// Logs focused time against a to-do: {minutes | seconds, start, end, note}. With only start and end, the gap is the time.
+    static func logTime(_ id: String, _ params: Params, source: String?) throws -> [String: Any] {
+        let task = try item(id)
+        guard !task.isHeading else { throw Failure("Time goes on a to-do or project, not a heading.") }
+        let start = string(params, "start").flatMap(dateTime)
+        let end = string(params, "end").flatMap(dateTime)
+        var seconds = Int(string(params, "seconds") ?? "") ?? Int((Double(string(params, "minutes") ?? "") ?? 0) * 60)
+        if seconds == 0, let start, let end { seconds = Int(end.timeIntervalSince(start)) }
+        guard seconds > 0 else { throw Failure("Send minutes (or seconds, or a start and an end) greater than zero.") }
+        guard seconds <= 24 * 3600 else { throw Failure("One entry can't be longer than 24 hours.") }
+        guard let entry = store.logTime(id, seconds: seconds, start: start ?? end.map { $0.addingTimeInterval(TimeInterval(-seconds)) },
+                                        end: end ?? start.map { $0.addingTimeInterval(TimeInterval(seconds)) },
+                                        source: string(params, "source") ?? source, note: string(params, "note"))
+        else { throw Failure("Couldn't save the time entry.", status: 500) }
+        return ["entry": encode(entry), "task": encode(try item(id))]
+    }
+
+    static func time(_ id: String) throws -> [String: Any] {
+        let task = try item(id)
+        var ids = [task.id]
+        if task.isProject { ids += store.tasks.filter { $0.projectID == task.id }.map(\.id) }
+        let entries = ids.flatMap { store.timeEntries(for: $0) }.sorted { $0.start > $1.start }
+        return ["id": task.id, "title": task.title, "tracked_minutes": store.trackedTime(task.id) / 60,
+                "tracked": Duration.text(seconds: store.trackedTime(task.id)), "entries": entries.map(encode)]
+    }
+
+    /// Time logged since a date (default: today), grouped by to-do.
+    static func timeReport(_ params: Params) throws -> [String: Any] {
+        let since: Date
+        if let raw = string(params, "since") {
+            let date: Date?
+            switch try? when(raw) {
+            case .date(let day)?: date = day
+            case .reminder(let moment)?: date = moment
+            case .today?, .evening?: date = Date()
+            default: date = dateTime(raw)
+            }
+            guard let date else { throw Failure("Couldn't understand since “\(raw)”. Use today, monday or 2026-11-01.") }
+            // "since friday" means the last one, not the next.
+            let day = Calendar.current.startOfDay(for: date)
+            since = day > Date() ? day.addingTimeInterval(-7 * 86400) : day
+        } else {
+            since = Calendar.current.startOfDay(for: Date())
+        }
+        let entries = store.timeEntries(since: since)
+        var byTask: [String: Int] = [:]
+        for entry in entries { byTask[entry.taskID, default: 0] += entry.seconds }
+        let tasks = byTask.sorted { $0.value > $1.value }.compactMap { id, seconds -> [String: Any]? in
+            guard let task = store.task(id) else { return nil }
+            return ["id": id, "title": task.title, "minutes": seconds / 60, "tracked": Duration.text(seconds: seconds)]
+        }
+        let total = entries.reduce(0) { $0 + $1.seconds }
+        return ["since": timestamp(since) ?? "", "total_minutes": total / 60, "total": Duration.text(seconds: total),
+                "tasks": tasks, "entries": entries.map(encode)]
+    }
+
+    static func encode(_ entry: TimeEntry) -> [String: Any] {
+        var out: [String: Any] = ["id": entry.id, "task_id": entry.taskID, "start": timestamp(entry.start) ?? "",
+                                  "end": timestamp(entry.end) ?? "", "minutes": entry.seconds / 60, "seconds": entry.seconds]
+        if let source = entry.source { out["source"] = source }
+        if let note = entry.note { out["note"] = note }
+        return out
+    }
+
     static func trash(_ id: String) throws -> TaskItem {
         _ = try item(id)
         store.moveToTrash(id)
@@ -426,7 +559,7 @@ enum ThingsAPI {
             return target.projectID.map { store.tasks(in: .project($0)) } ?? target.areaID.map { store.tasks(in: .area($0)) } ?? []
         }
         if let tag = store.allTags.first(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) { return store.tasks(in: .tag(tag)) }
-        throw Failure("No list called “\(name)”. Use today, evening, inbox, upcoming, anytime, someday, logbook, or a project, area or tag.", status: 404)
+        throw Failure("No list called “\(name)”. Use today, evening, inbox, upcoming, anytime, someday, ideas, logbook, or a project, area or tag.", status: 404)
     }
 
     /// Filters for GET /v1/tasks: q, status (open | completed | canceled | all), tag, completed-since, modified-since.
@@ -443,6 +576,14 @@ enum ThingsAPI {
         case "canceled": items = items.filter(\.isCanceled)
         case "all": break
         default: throw Failure("status must be open, completed, canceled or all.")
+        }
+        if let raw = string(params, "state") {
+            guard let flow = Flow.named(raw) else { throw Failure("state must be backlog, todo, in-progress, waiting, done or canceled.") }
+            items = items.filter { $0.flow == flow && $0.isTodo }
+        }
+        if let raw = string(params, "priority") {
+            guard let priority = Priority.named(raw) else { throw Failure("priority must be none, low, medium, high or urgent.") }
+            items = items.filter { $0.priority == priority }
         }
         if let tag = string(params, "tags") { items = items.filter { $0.tags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame } } }
         if let since = string(params, "completed-since") {
@@ -473,11 +614,11 @@ enum ThingsAPI {
     static func encode(_ task: TaskItem) -> [String: Any] {
         var out: [String: Any] = [
             "id": task.id,
-            "type": task.isProject ? "project" : (task.isHeading ? "heading" : "to-do"),
+            "type": task.isProject ? "project" : (task.isHeading ? "heading" : (task.isIdea ? "idea" : "to-do")),
             "title": task.title,
             "notes": task.notes,
             "status": task.status.rawValue,
-            "list": whenLabel(task),
+            "list": task.isIdea && task.isOpen ? "ideas" : whenLabel(task),
             "tags": task.tags,
             "checklist": task.checklist.sorted { $0.index < $1.index }.map { ["id": $0.id, "title": $0.title, "completed": $0.done] },
             "created": timestamp(task.createdAt) ?? "",
@@ -492,6 +633,22 @@ enum ThingsAPI {
         if let projectID = task.projectID, let project = store.task(projectID) { out["project"] = ["id": project.id, "title": project.title] }
         if let areaID = task.areaID, let area = store.area(areaID) { out["area"] = ["id": area.id, "title": area.title] }
         if let headingID = task.headingID, let heading = store.task(headingID) { out["heading"] = ["id": heading.id, "title": heading.title] }
+        if task.isTodo {
+            out["state"] = task.flow == .progress ? "in-progress" : task.flow.rawValue
+            out["priority"] = task.priority == .none ? "none" : task.priority.title.lowercased()
+            if task.estimate > 0 { out["estimate_minutes"] = task.estimate }
+            if task.isOpen, task.stage == .waiting {
+                if let on = task.waitingOn { out["waiting-on"] = on }
+                if let blocker = task.blockedBy.flatMap({ store.task($0) }) { out["blocked-by"] = ["id": blocker.id, "title": blocker.title] }
+            }
+        }
+        let tracked = store.trackedTime(task.id)
+        out["tracked_minutes"] = tracked / 60
+        if tracked > 0 { out["tracked"] = Duration.text(seconds: tracked) }
+        if task.isIdea {
+            out["stage"] = task.ideaStage.rawValue
+            out["steps"] = TaskStore.extractSteps(from: task.notes).steps
+        }
         if task.isProject {
             let progress = store.projectProgress(task.id)
             out["progress"] = ["done": progress.done, "total": progress.total]

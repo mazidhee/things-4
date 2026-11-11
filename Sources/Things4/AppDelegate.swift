@@ -20,7 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSApp.activate(ignoringOtherApps: true)
         _ = QuickEntryWindowController.shared
         ReminderService.shared.start()
-        if !CommandLine.arguments.contains(where: { $0.hasPrefix("--") }) { PhoneReminders.shared.start() }
+        if !CommandLine.arguments.contains(where: { $0.hasPrefix("--") }) { RemindersSync.shared.start() }
         if !CommandLine.arguments.contains(where: { $0.hasPrefix("--") }) || ProcessInfo.processInfo.environment["THINGS4_API_PORT"] != nil {
             APIServer.shared.refresh()
         }
@@ -132,6 +132,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 if let list = BuiltinList(rawValue: name) { AppState.shared.selection = .builtin(list) }
                 else if let area = TaskStore.shared.areas.first(where: { $0.title == name }) { AppState.shared.selection = .area(area.id) }
                 else if let project = TaskStore.shared.tasks.first(where: { $0.isProject && $0.title == name }) { AppState.shared.selection = .project(project.id) }
+                else if let idea = TaskStore.shared.ideas.first(where: { $0.title == name }) {
+                    AppState.shared.selection = .builtin(.ideas)
+                    DispatchQueue.main.async { NotificationCenter.default.post(name: .openNotePage, object: idea.id) }
+                }
             }
             if CommandLine.arguments.contains("--snapshot-project"),
                let project = TaskStore.shared.tasks.first(where: { $0.isProject }) {
@@ -145,6 +149,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
             if CommandLine.arguments.contains("--snapshot-settings") {
                 SettingsWindowController.shared.showWindow(nil)
+            }
+            if let index = CommandLine.arguments.firstIndex(of: "--snapshot-plan"), CommandLine.arguments.count > index + 1 {
+                let text = CommandLine.arguments[index + 1]
+                PlanDayWindowController.shared.show(text: text)
+                PlanDayWindowController.shared.debugSort()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    PlanDayWindowController.shared.debugSnapshot(path.replacingOccurrences(of: ".png", with: "-plan.png"))
+                }
             }
             if CommandLine.arguments.contains("--snapshot-page"),
                let task = TaskStore.shared.tasks.first(where: { $0.isTodo && $0.isOpen && !$0.notes.isEmpty }) ?? TaskStore.shared.tasks.first(where: { $0.isTodo }) {
@@ -262,6 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         fileMenu.addItem(item("New Area", #selector(newArea), target: self))
         fileMenu.addItem(.separator())
         fileMenu.addItem(item("Quick Entry", #selector(quickEntry), " ", [.control], target: self))
+        fileMenu.addItem(item("Plan My Day…", #selector(planDay), "d", [.command, .shift], target: self))
         fileMenu.addItem(.separator())
         let exportMenu = NSMenu(title: "Export")
         exportMenu.addItem(item("Markdown…", #selector(exportMarkdown), target: self))
@@ -495,6 +508,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc func backToList() {
         (MainWindowController.active ?? .shared).root.closeNote()
+    }
+
+    @objc private func planDay() {
+        PlanDayWindowController.shared.show()
     }
 
     @objc private func quickEntry() {

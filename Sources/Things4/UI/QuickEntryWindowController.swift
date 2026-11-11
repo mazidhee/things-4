@@ -243,6 +243,14 @@ final class QuickEntryWindowController: NSWindowController, NSTextViewDelegate, 
         let title = titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { cancel(); return }
         let store = TaskStore.shared
+        // "idea: …" files it in Ideas instead of the Inbox.
+        if let range = title.range(of: #"^idea\s*:\s*"#, options: [.regularExpression, .caseInsensitive]), !title[range.upperBound...].isEmpty {
+            let idea = store.createIdea(title: String(title[range.upperBound...]), notes: notesView.string,
+                                        areaID: areaID ?? projectID.flatMap { store.task($0)?.areaID })
+            if !tags.isEmpty { store.setTags(idea.id, tags) }
+            window?.orderOut(nil)
+            return
+        }
         var bucket: StartBucket = (projectID != nil || areaID != nil) ? .anytime : .inbox
         var start: Date? = nil
         var evening = false

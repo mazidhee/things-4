@@ -17,7 +17,9 @@ final class TaskRowView: HoverRowView, NSDraggingSource {
     var onContextMenu: ((TaskItem, NSEvent) -> Void)?
     var dragIDs: (() -> [String])?
 
-    private let checkbox = CheckboxView()
+    let checkbox = CheckboxView()
+    private let priorityIcon = NSImageView()
+    private let waitLabel = NSTextField.label("", font: Fonts.regular(11.5), color: Theme.flowColor(.waiting))
     private let titleLabel = NSTextField.label("", font: Fonts.regular(14), color: Theme.text)
     private let notesLabel = NSTextField.label("", font: Fonts.regular(11.5), color: Theme.secondary)
     private let deadlineLabel = NSTextField.label("", font: Fonts.regular(11.5), color: Theme.deadline)
@@ -29,6 +31,8 @@ final class TaskRowView: HoverRowView, NSDraggingSource {
     private let ring = ProgressRing()
     private let noteIcon = NSImageView()
     private let focusIcon = NSImageView()
+    private let timeLabel = NSTextField.label("", font: Fonts.medium(10.5), color: Theme.tertiary)
+    private let plainButton = IconButton(symbol: "timer", size: 12, color: Theme.accent, tooltip: "Focus in Plain")
     private let checklistIcon = NSImageView()
     private let dateChip = TagChip("")
     private let countChip = TagChip("")
@@ -57,6 +61,17 @@ final class TaskRowView: HoverRowView, NSDraggingSource {
         checkbox.isSquare = true
         checkbox.isChecked = task.isCompleted
         checkbox.isCanceled = task.isCanceled
+        checkbox.flow = task.flow
+        if task.isTodo, task.isOpen, task.priority != .none {
+            priorityIcon.image = WorkflowIcons.priorityImage(task.priority)
+            priorityIcon.toolTip = task.priority.title + " priority"
+            addSubview(priorityIcon)
+        }
+        if task.isTodo, let waiting = TaskStore.shared.waitingLabel(task) {
+            waitLabel.stringValue = waiting
+            waitLabel.lineBreakMode = .byTruncatingTail
+            addSubview(waitLabel)
+        }
         checkbox.tint = task.isProject ? Theme.projectColor(for: task.id) : Theme.accent
         checkbox.onToggle = { [weak self] alternate in
             guard let self else { return }
@@ -164,6 +179,19 @@ final class TaskRowView: HoverRowView, NSDraggingSource {
             focusIcon.image = NSImage.symbol("timer", size: 10, weight: .semibold, color: Theme.accent)
             addSubview(focusIcon)
         }
+        if task.isTodo && task.isOpen && Plain.isInstalled {
+            plainButton.target = self
+            plainButton.action = #selector(focusInPlain)
+            plainButton.isHidden = ProcessInfo.processInfo.environment["THINGS4_SNAP_HOVER"] != task.title
+            addSubview(plainButton)
+        }
+        let tracked = TaskStore.shared.trackedTime(task.id)
+        if (tracked >= 60 || (task.estimate > 0 && task.isOpen)) && !task.isHeading {
+            let estimate = task.estimate > 0 ? " / " + Duration.text(seconds: task.estimate * 60) : ""
+            timeLabel.stringValue = Duration.text(seconds: tracked) + estimate
+            timeLabel.toolTip = "\(Duration.text(seconds: tracked)) of focus logged" + (task.estimate > 0 ? ", \(Duration.text(seconds: task.estimate * 60)) estimated" : "")
+            addSubview(timeLabel)
+        }
         if task.repeatRule != nil {
             repeatIcon.image = NSImage.symbol("repeat", size: 9, weight: .semibold, color: Theme.tertiary)
             addSubview(repeatIcon)
@@ -206,6 +234,10 @@ final class TaskRowView: HoverRowView, NSDraggingSource {
         if showsParent && (task.projectID != nil || task.areaID != nil) { height += 13 * scale }
         return ceil(height)
     }
+
+    override var isHovered: Bool { didSet { plainButton.isHidden = !isHovered } }
+
+    @objc private func focusInPlain() { Plain.focus(on: task) }
 
     override func draw(_ dirtyRect: NSRect) {
         let rect = bounds.insetBy(dx: -6, dy: 1)
@@ -254,17 +286,36 @@ final class TaskRowView: HoverRowView, NSDraggingSource {
             textX += size.width + 6
         }
         var rightInset: CGFloat = 4
+        if priorityIcon.superview != nil {
+            priorityIcon.frame = NSRect(x: width - 15, y: mid - 7, width: 14, height: 14)
+            rightInset = 24
+        }
         if !deadlineLabel.isHidden {
             let deadlineWidth = ceil(deadlineLabel.attributedStringValue.size().width) + 4
-            deadlineLabel.frame = NSRect(x: width - deadlineWidth + 2, y: 6 * Fonts.scale, width: deadlineWidth, height: 16 * Fonts.scale)
-            rightInset = deadlineWidth + 12
+            deadlineLabel.frame = NSRect(x: width - (rightInset - 4) - deadlineWidth + 2, y: 6 * Fonts.scale, width: deadlineWidth, height: 16 * Fonts.scale)
+            rightInset += deadlineWidth + 8
+        }
+        if waitLabel.superview != nil {
+            let waitWidth = min(240, ceil(waitLabel.attributedStringValue.size().width) + 8)
+            waitLabel.frame = NSRect(x: width - (rightInset - 4) - waitWidth, y: 7 * Fonts.scale, width: waitWidth, height: 15 * Fonts.scale)
+            rightInset += waitWidth + 8
+        }
+
+        if plainButton.superview != nil {
+            plainButton.frame = NSRect(x: width - rightInset - 18, y: 5 * Fonts.scale, width: 20, height: 18 * Fonts.scale)
+            rightInset += 22
         }
 
         let trailingIcons = [focusIcon, noteIcon, checklistIcon, repeatIcon, eveningIcon].filter { $0.superview != nil }
         let countWidth: CGFloat = countChip.superview != nil ? countChip.intrinsicContentSize.width + 6 : 0
         var chipsWidth: CGFloat = 0
         for chip in tagChips { chipsWidth += chip.intrinsicContentSize.width + 5 }
-        let reserved = CGFloat(trailingIcons.count) * 16 + chipsWidth + countWidth + 4
+        let timeWidth: CGFloat = timeLabel.superview != nil ? ceil(timeLabel.attributedStringValue.size().width) + 20 : 0
+        // The title comes first: tags take whatever room is left and drop off when there is none.
+        let needed = CGFloat(trailingIcons.count) * 16 + countWidth + timeWidth + 4
+        let natural = textWidth(titleLabel.stringValue, font: titleLabel.font) - 8
+        let roomWithTags = width - textX - rightInset - needed - chipsWidth
+        let reserved = needed + (natural <= roomWithTags ? chipsWidth : 0)
         let maxTitle = max(60, width - textX - rightInset - reserved)
         let titleWidth = min(maxTitle, textWidth(titleLabel.stringValue, font: titleLabel.font) - 8)
         titleLabel.frame = NSRect(x: textX, y: 5 * Fonts.scale, width: titleWidth, height: 19 * Fonts.scale)
@@ -277,6 +328,10 @@ final class TaskRowView: HoverRowView, NSDraggingSource {
         for icon in trailingIcons {
             icon.frame = NSRect(x: x, y: 8 * Fonts.scale, width: 12, height: 12 * Fonts.scale)
             x += 16
+        }
+        if timeWidth > 0 {
+            timeLabel.frame = NSRect(x: x, y: 7 * Fonts.scale, width: timeWidth - 6, height: 14 * Fonts.scale)
+            x += timeWidth
         }
         for chip in tagChips {
             let size = chip.intrinsicContentSize

@@ -19,12 +19,15 @@
 ## Features
 
 - **The Things 3 workflow**: Inbox, Today, This Evening, Upcoming, Anytime, Someday and Logbook, plus areas, projects, headings, checklists, tags, deadlines and repeating to-dos.
+- **Know where everything stands**: six statuses (Backlog, Todo, In Progress, Waiting, Done, Canceled), priorities, estimates and "waiting on" for every to-do. An Active list gathers what is moving across all projects, and every project and area opens as a grouped list, a board or a table.
+- **Ideas**: projects you haven't committed to yet, each a page of notes and research marked Raw, Researching or Ready. Start one now or save it for Someday, and its checkboxes become to-dos. Claude can read and add research through the MCP server, or copy an idea as a prompt.
+- **Plan My Day** (⇧⌘D): say or type everything on your mind and Things sorts it into Today, most important first, matching the to-dos you already have. It works offline, and uses your AI provider or a local model when AI is on.
 - **Keyboard-first**: Quick Entry from any app (⌃Space), Autofill links from Safari, Mail or Finder (⌃⌥Space), Quick Find (⌘F), and full undo.
-- **Reminders that reach your phone**: Mac notifications with Complete and Snooze, mirrored to Apple Reminders so your iPhone and Apple Watch ring too.
+- **Sync with your iPhone**: two-way sync with Apple Reminders through your own iCloud. Projects and areas become lists, and adding, completing or rescheduling on your phone shows up on your Mac. Reminders ring on your Mac, iPhone and Apple Watch.
 - **Calendar events** from iCloud, Google and Outlook appear alongside Today and Upcoming.
 - **Notes as pages**: live Markdown, plus drop-in links to emails, files and web pages.
-- **Extras**: Notion-style cover images, a focus timer, a menu bar list, Markdown and PDF export, and an optional AI sidebar you can switch off.
-- **Yours**: one SQLite file on your Mac, with no account, no sync server and no telemetry.
+- **Extras**: Notion-style cover images, a focus timer that logs time onto each to-do, a menu bar list, four dark themes, Markdown and PDF export, and an optional AI sidebar you can switch off.
+- **Yours**: one SQLite file on your Mac, with no account, no servers and no telemetry.
 
 <p align="center">
   <img src="docs/screenshots/project.png" width="820" alt="A project with tags and deadlines">
@@ -62,6 +65,20 @@ things4 search --tag learning --completed-since 2026-11-01
 
 ```
 things4:///add?title=Read%20chapter%204&when=today&tags=learning
+```
+
+**Time on every to-do.** The focus timer, [Plain](https://github.com/mazidhee/plain) and your agents log focused time onto to-dos, so each one shows how long it took (projects add up their to-dos).
+
+```sh
+curl http://127.0.0.1:7474/v1/tasks/$ID/time -H "Authorization: Bearer $TOKEN" -d '{"minutes": 40, "note": "chapters 1-2"}'
+things4 time --since monday      # totals per to-do
+```
+
+**Agents see where things stand.** Every to-do carries a `state` (`backlog`, `todo`, `in-progress`, `waiting`, `done`, `canceled`), a `priority` and an `estimate`, and can wait on a person or be blocked by another to-do.
+
+```sh
+curl -X PATCH http://127.0.0.1:7474/v1/tasks/$ID -H "Authorization: Bearer $TOKEN" -d '{"state": "waiting", "waiting_on": "Henry", "priority": "high"}'
+curl "http://127.0.0.1:7474/v1/tasks?list=active" -H "Authorization: Bearer $TOKEN"   # in progress or waiting
 ```
 
 **Agents organise their own work.** Each agent's to-dos are tagged with its name, so you can filter your tutor's tasks in one click. Set the name with `"env": {"THINGS4_SOURCE": "tutor"}` in the MCP config, or send an `X-Things-Source` header. If an agent names a project or area that doesn't exist yet, Things 4 creates it, and headings inside projects are created too.

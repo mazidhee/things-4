@@ -5,10 +5,12 @@ final class SettingsWindowController: NSWindowController {
 
     // General
     private let appearancePopup = NSPopUpButton()
+    private let darkThemePopup = NSPopUpButton()
     private let aiToggle = NSButton(checkboxWithTitle: "Enable AI features", target: nil, action: nil)
     private let badgeToggle = NSButton(checkboxWithTitle: "Show the Today count on the Dock icon", target: nil, action: nil)
     private let menuBarToggle = NSButton(checkboxWithTitle: "Show Today and the focus timer in the menu bar", target: nil, action: nil)
-    private let phoneToggle = NSButton(checkboxWithTitle: "Also remind me on iPhone and Apple Watch", target: nil, action: nil)
+    private let phoneToggle = NSButton(checkboxWithTitle: "Sync with Apple Reminders on iPhone, iPad and Apple Watch", target: nil, action: nil)
+    private let syncStatus = NSTextField.wrappingLabel("", font: Fonts.regular(10.5), color: Theme.secondary)
     private let logPopup = NSPopUpButton()
     private let textSizeSlider = NSSlider(value: 1, minValue: 0.85, maxValue: 1.3, target: nil, action: nil)
     private let groupTodayToggle = NSButton(checkboxWithTitle: "Group to-dos in the Today list by project or area", target: nil, action: nil)
@@ -110,6 +112,10 @@ final class SettingsWindowController: NSWindowController {
         appearancePopup.target = self
         appearancePopup.action = #selector(appearanceChanged)
         appearancePopup.font = Fonts.regular(12)
+        for theme in DarkTheme.allCases { darkThemePopup.addItem(withTitle: theme.title) }
+        darkThemePopup.target = self
+        darkThemePopup.action = #selector(darkThemeChanged)
+        darkThemePopup.font = Fonts.regular(12)
 
         aiToggle.target = self
         aiToggle.action = #selector(generalChanged)
@@ -131,9 +137,9 @@ final class SettingsWindowController: NSWindowController {
                                               font: Fonts.regular(10.5), color: Theme.tertiary)
         let quickHint = NSTextField.wrappingLabel("Press ⌃Space in any app to capture a to-do into your Inbox. ⌃⌥Space also links the web page, Mail message or file in front.",
                                                  font: Fonts.regular(10.5), color: Theme.tertiary)
-        let phoneHint = NSTextField.wrappingLabel("Reminders are copied to a “Things 4” list in Apple Reminders, which iCloud syncs to your iPhone and Watch. Ticking one off there completes the to-do here.",
+        let phoneHint = NSTextField.wrappingLabel("Each project and area becomes a Reminders list, plus Inbox and Anytime. Add, complete, rename or reschedule on your phone and it shows up here, and the other way round. Your own Reminders lists are left alone.",
                                                  font: Fonts.regular(10.5), color: Theme.tertiary)
-        let dataHint = NSTextField.wrappingLabel("All tasks live in a local SQLite database. No account, no sync, no telemetry.",
+        let dataHint = NSTextField.wrappingLabel("All tasks live in a local SQLite database on this Mac. No account, no servers, no telemetry: sync goes through your own iCloud Reminders.",
                                                 font: Fonts.regular(10.5), color: Theme.tertiary)
 
         logPopup.addItems(withTitles: ["Immediately", "Daily"])
@@ -159,16 +165,22 @@ final class SettingsWindowController: NSWindowController {
         let appearanceRow = NSStackView(views: [NSTextField.label("Appearance", font: Fonts.medium(12), color: Theme.secondary), appearancePopup])
         appearanceRow.orientation = .horizontal
         appearanceRow.spacing = 12
+        let darkThemeRow = NSStackView(views: [NSTextField.label("Dark theme", font: Fonts.medium(12), color: Theme.secondary), darkThemePopup])
+        darkThemeRow.orientation = .horizontal
+        darkThemeRow.spacing = 12
 
-        let stack = NSStackView(views: [logRow, appearanceRow, textRow, groupTodayToggle, aiToggle, aiHint, badgeToggle, menuBarToggle, phoneToggle, phoneHint, quickEntryToggle, quickHint, dataHint])
+        let stack = NSStackView(views: [logRow, appearanceRow, darkThemeRow, textRow, groupTodayToggle, aiToggle, aiHint, badgeToggle, menuBarToggle, phoneToggle, phoneHint, syncStatus, quickEntryToggle, quickHint, dataHint])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
-        stack.setCustomSpacing(18, after: appearanceRow)
+        stack.setCustomSpacing(10, after: appearanceRow)
+        stack.setCustomSpacing(18, after: darkThemeRow)
         stack.setCustomSpacing(4, after: aiToggle)
         stack.setCustomSpacing(16, after: aiHint)
         stack.setCustomSpacing(4, after: phoneToggle)
-        stack.setCustomSpacing(16, after: phoneHint)
+        stack.setCustomSpacing(4, after: phoneHint)
+        stack.setCustomSpacing(16, after: syncStatus)
+        NotificationCenter.default.addObserver(self, selector: #selector(updateSyncStatus), name: RemindersSync.didSync, object: nil)
         stack.setCustomSpacing(4, after: quickEntryToggle)
         stack.setCustomSpacing(24, after: quickHint)
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -177,7 +189,8 @@ final class SettingsWindowController: NSWindowController {
             stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
             stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
-            appearancePopup.widthAnchor.constraint(equalToConstant: 140)
+            appearancePopup.widthAnchor.constraint(equalToConstant: 140),
+            darkThemePopup.widthAnchor.constraint(equalToConstant: 140)
         ])
         return root
     }
@@ -409,13 +422,15 @@ final class SettingsWindowController: NSWindowController {
 
     private func loadGeneral() {
         appearancePopup.selectItem(withTitle: Preferences.appearance.title)
+        darkThemePopup.selectItem(withTitle: Preferences.darkTheme.title)
         logPopup.selectItem(at: Preferences.logImmediately ? 0 : 1)
         textSizeSlider.doubleValue = Double(Preferences.textScale)
         groupTodayToggle.state = Preferences.groupToday ? .on : .off
         aiToggle.state = Preferences.aiEnabled ? .on : .off
         badgeToggle.state = Preferences.showDockBadge ? .on : .off
         menuBarToggle.state = Preferences.menuBarEnabled ? .on : .off
-        phoneToggle.state = Preferences.phoneReminders && PhoneReminders.shared.status != .denied ? .on : .off
+        phoneToggle.state = Preferences.remindersSync && Self.reminders.status != .denied ? .on : .off
+        updateSyncStatus()
         quickEntryToggle.state = Preferences.quickEntryEnabled ? .on : .off
         updateAIAvailability()
     }
@@ -440,21 +455,36 @@ final class SettingsWindowController: NSWindowController {
         Preferences.appearance = AppearanceMode.allCases[min(index, AppearanceMode.allCases.count - 1)]
     }
 
+    @objc private func darkThemeChanged() {
+        let index = max(0, darkThemePopup.indexOfSelectedItem)
+        Preferences.darkTheme = DarkTheme.allCases[min(index, DarkTheme.allCases.count - 1)]
+    }
+
     @objc private func generalChanged() {
         if Preferences.groupToday != (groupTodayToggle.state == .on) { Preferences.groupToday = groupTodayToggle.state == .on }
         if Preferences.aiEnabled != (aiToggle.state == .on) { Preferences.aiEnabled = aiToggle.state == .on }
         if Preferences.menuBarEnabled != (menuBarToggle.state == .on) { Preferences.menuBarEnabled = menuBarToggle.state == .on }
-        if phoneToggle.state == .on, !PhoneReminders.shared.hasAccess {
-            PhoneReminders.shared.requestAccess { [weak self] granted in
-                Preferences.phoneReminders = granted
+        if phoneToggle.state == .on, !Self.reminders.hasAccess {
+            Self.reminders.requestAccess { [weak self] granted in
+                Preferences.remindersSync = granted
                 self?.phoneToggle.state = granted ? .on : .off
-                if !granted {
-                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders")!)
-                }
+                if granted { RemindersSync.shared.sync() }
+                else { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders")!) }
+                self?.updateSyncStatus()
             }
-        } else if Preferences.phoneReminders != (phoneToggle.state == .on) {
-            Preferences.phoneReminders = phoneToggle.state == .on
-            if phoneToggle.state == .on { PhoneReminders.shared.sync() } else { PhoneReminders.shared.disable() }
+        } else if Preferences.remindersSync != (phoneToggle.state == .on) {
+            Preferences.remindersSync = phoneToggle.state == .on
+            if phoneToggle.state == .on {
+                RemindersSync.shared.sync()
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "Remove the Things Lists from Reminders?"
+                alert.informativeText = "Sync is off. You can remove the lists Things 4 made in Reminders, or keep them there as they are. Your to-dos in Things 4 aren't affected either way."
+                alert.addButton(withTitle: "Remove Lists")
+                alert.addButton(withTitle: "Keep Them")
+                RemindersSync.shared.disable(removeLists: alert.runModal() == .alertFirstButtonReturn)
+            }
+            updateSyncStatus()
         }
         if Preferences.showDockBadge != (badgeToggle.state == .on) { Preferences.showDockBadge = badgeToggle.state == .on }
         if Preferences.quickEntryEnabled != (quickEntryToggle.state == .on) { Preferences.quickEntryEnabled = quickEntryToggle.state == .on }
@@ -562,6 +592,21 @@ final class SettingsWindowController: NSWindowController {
                     self.statusLabel.textColor = Theme.deadline
                 }
             }
+        }
+    }
+
+    private static var reminders: EventKitReminders { EventKitReminders.sharedStatus }
+
+    @objc private func updateSyncStatus() {
+        let sync = RemindersSync.shared
+        if !Preferences.remindersSync {
+            syncStatus.stringValue = "Off."
+        } else if Self.reminders.status == .denied {
+            syncStatus.stringValue = "Reminders access is off: System Settings › Privacy & Security › Reminders."
+        } else if let last = sync.lastSync {
+            syncStatus.stringValue = "Synced \(last.formatted(date: .omitted, time: .shortened)) · \(sync.lastSummary)"
+        } else {
+            syncStatus.stringValue = "Syncing…"
         }
     }
 

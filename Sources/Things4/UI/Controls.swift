@@ -15,8 +15,28 @@ final class CheckboxView: NSView {
     var isSquare = false {
         didSet { needsDisplay = true }
     }
+    /// Backlog, In Progress and Waiting each draw their own open box.
+    var flow: Flow = .todo {
+        didSet { needsDisplay = true }
+    }
     /// Called with `true` when the click carried the Option key.
     var onToggle: ((Bool) -> Void)?
+
+    /// A quick squeeze-and-release when the status changes.
+    func pop() {
+        wantsLayer = true
+        guard let layer else { return }
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        func scaled(_ scale: CGFloat) -> CATransform3D {
+            CATransform3DTranslate(CATransform3DScale(CATransform3DMakeTranslation(center.x, center.y, 0), scale, scale, 1), -center.x, -center.y, 0)
+        }
+        let animation = CAKeyframeAnimation(keyPath: "transform")
+        animation.values = [scaled(1), scaled(0.72), scaled(1.16), scaled(1)].map { NSValue(caTransform3D: $0) }
+        animation.keyTimes = [0, 0.3, 0.7, 1]
+        animation.duration = 0.36
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(animation, forKey: "pop")
+    }
 
     private var hovering = false {
         didSet { needsDisplay = true }
@@ -65,6 +85,8 @@ final class CheckboxView: NSView {
             mark.lineJoinStyle = .round
             NSColor.white.setStroke()
             mark.stroke()
+        } else if isSquare && flow != .todo && flow != .done && flow != .canceled {
+            WorkflowIcons.drawOpen(flow, in: rect, square: true, hovering: hovering, tint: tint)
         } else {
             let stroke = hovering ? Theme.secondary : Theme.checkboxStroke
             stroke.setStroke()

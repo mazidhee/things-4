@@ -14,6 +14,7 @@ final class FocusTimer {
     private var endDate: Date?
     private var pausedRemaining: TimeInterval?
     private var ticker: Timer?
+    private var startedAt: Date?
 
     var isRunning: Bool { taskID != nil }
     var isPaused: Bool { pausedRemaining != nil }
@@ -33,7 +34,9 @@ final class FocusTimer {
     }
 
     func start(taskID: String, minutes: Int = 25) {
+        logElapsed()
         self.taskID = taskID
+        startedAt = Date()
         duration = TimeInterval(minutes * 60)
         endDate = Date().addingTimeInterval(duration)
         pausedRemaining = nil
@@ -67,6 +70,7 @@ final class FocusTimer {
     }
 
     func stop() {
+        logElapsed()
         ticker?.invalidate()
         taskID = nil
         endDate = nil
@@ -76,6 +80,7 @@ final class FocusTimer {
 
     /// Completes the to-do and ends the session.
     func completeTask() {
+        logElapsed()
         if let id = taskID, TaskStore.shared.task(id)?.isOpen == true { TaskStore.shared.toggleCompletion(id) }
         stop()
     }
@@ -94,6 +99,7 @@ final class FocusTimer {
         ticker?.invalidate()
         let title = task?.title ?? "Focus session"
         let minutes = Int(duration / 60)
+        logElapsed()
         NSSound(named: "Glass")?.play()
         if Bundle.main.bundleIdentifier != nil {
             let content = UNMutableNotificationContent()
@@ -105,6 +111,15 @@ final class FocusTimer {
         taskID = nil
         endDate = nil
         changed()
+    }
+
+    /// Writes the time focused so far onto the to-do. A minute or less isn't worth logging.
+    private func logElapsed() {
+        guard let id = taskID, let startedAt else { return }
+        let seconds = Int(duration - remaining)
+        self.startedAt = nil
+        guard seconds >= 60 else { return }
+        TaskStore.shared.logTime(id, seconds: seconds, start: startedAt, source: "Focus Timer")
     }
 
     private func changed() {

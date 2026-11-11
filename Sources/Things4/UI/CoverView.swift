@@ -247,13 +247,15 @@ final class CoverControls: NSView {
 final class AddCoverReveal: NSView {
     private let button = FlatButton(title: "Add Cover", symbol: "photo", color: Theme.secondary, fontSize: 12)
     var onAdd: (() -> Void)?
+    /// Space kept free at the right edge for the header's own button.
+    var trailingInset: CGFloat = 0 { didSet { needsLayout = true } }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         autoresizingMask = [.width, .height]
         button.target = self
         button.action = #selector(add)
-        button.alphaValue = 0
+        button.alphaValue = ProcessInfo.processInfo.environment["THINGS4_SNAP_HOVER"] == "cover" ? 1 : 0
         addSubview(button)
     }
 
@@ -261,8 +263,9 @@ final class AddCoverReveal: NSView {
 
     override func layout() {
         super.layout()
-        let width = button.intrinsicContentSize.width + 8
-        button.frame = NSRect(x: bounds.width - width, y: 9, width: width, height: 24)
+        // This view is not flipped: measure from the top so it lines up with the header's own button.
+        let width = ceil(button.intrinsicContentSize.width)
+        button.frame = NSRect(x: bounds.width - width - (trailingInset > 0 ? trailingInset + 18 : 0), y: bounds.height - 13 - 24, width: width, height: 24)
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {

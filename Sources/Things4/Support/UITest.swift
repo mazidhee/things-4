@@ -93,12 +93,9 @@ enum UITest {
             check(store.children(of: id).contains { $0.title == "After modal task" }, "to-do created after creating project via prompt")
         }
         step("create area + project") {
-            if let existing = store.tasks.first(where: { $0.isProject && $0.isOpen && $0.title == "Bank reconciliation" }) {
-                projectID = existing.id
-            } else {
-                let area = store.createArea(title: "Work")
-                projectID = store.createProject(title: "Bank reconciliation", areaID: area.id).id
-            }
+            // A name no real project uses, so the checks below count only what this run creates.
+            let area = store.createArea(title: "UI Test Area")
+            projectID = store.createProject(title: "UI Test Project", areaID: area.id).id
             AppState.shared.selection = .project(projectID)
         }
         step("cmd-N creates and opens a to-do") {

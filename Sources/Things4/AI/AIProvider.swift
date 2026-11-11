@@ -171,9 +171,10 @@ enum AIClient {
     static func complete(system: String, messages: [AIMessage], maxTokens: Int = 2200) async throws -> String {
         let provider = AISettings.provider
         let key = AISettings.key(for: provider)
-        guard !key.isEmpty else { throw AIFailure.missingKey }
-        let model = AISettings.model(for: provider)
         let base = normalized(AISettings.baseURL(for: provider))
+        // A model server on this Mac (Ollama, LM Studio, mlx_lm) needs no key.
+        guard !key.isEmpty || isLocal(base) else { throw AIFailure.missingKey }
+        let model = AISettings.model(for: provider)
 
         switch AISettings.format(for: provider) {
         case .anthropic:
@@ -183,6 +184,11 @@ enum AIClient {
             return try await openAI(base: base, key: key, model: model, system: system,
                                     messages: messages, maxTokens: maxTokens)
         }
+    }
+
+    static func isLocal(_ base: String) -> Bool {
+        guard let host = URL(string: base.trimmingCharacters(in: .whitespacesAndNewlines))?.host?.lowercased() else { return false }
+        return host == "localhost" || host == "127.0.0.1" || host == "::1" || host.hasSuffix(".local")
     }
 
     private static func normalized(_ value: String) -> String {

@@ -87,7 +87,11 @@ enum AgentBridge {
         "checklist": ["type": "array", "items": ["type": "string"], "description": "Checklist steps inside the to-do."],
         "list": ["type": "string", "description": "Project or area title (or id) to put it in; a new project is created if none matches. Omit for the Inbox."],
         "area": ["type": "string", "description": "When list names a new project, the area to create it in (created too if missing)."],
-        "heading": ["type": "string", "description": "Heading inside the project; created if missing."]
+        "heading": ["type": "string", "description": "Heading inside the project; created if missing."],
+        "state": ["type": "string", "description": "Where it stands: backlog, todo, in-progress, waiting, done or canceled. in-progress also plans it for today."],
+        "priority": ["type": "string", "description": "none, low, medium, high or urgent."],
+        "estimate": ["type": "string", "description": "Expected effort: minutes (90) or hours (1.5h)."],
+        "waiting_on": ["type": "string", "description": "Who or what it is waiting on, e.g. Henry. Sets the state to waiting."]
     ]
 
     private static func schema(_ properties: [String: Any], required: [String] = []) -> [String: Any] {
@@ -103,7 +107,8 @@ enum AgentBridge {
         update["completed"] = ["type": "boolean", "description": "true completes it, false reopens it."]
         update["canceled"] = ["type": "boolean", "description": "true cancels it."]
         update["when"] = ["type": "string", "description": "As for add_todo; an empty string moves it to Anytime."]
-        let listNames = "today, evening, inbox, upcoming, anytime, someday, logbook, or a project, area or tag name"
+        update["blocked_by"] = ["type": "string", "description": "Id of the to-do that must finish first. Sets the state to waiting; completing the blocker moves this back to todo."]
+        let listNames = "today, evening, active (in progress or waiting), inbox, upcoming, anytime, someday, logbook, or a project, area or tag name"
         return [
             ["name": "add_todo", "description": "Create a to-do in Things 4. Returns it with its id.",
              "inputSchema": schema(todoFields, required: ["title"])],
@@ -135,12 +140,44 @@ enum AgentBridge {
                 "limit": ["type": "integer"]
              ])],
             ["name": "list_projects", "description": "Open projects with their progress.", "inputSchema": schema([:])],
+            ["name": "list_ideas", "description": "The user's Ideas: projects they haven't committed to yet, each with notes (Markdown) and a stage (raw, researching, ready).",
+             "inputSchema": schema([:])],
+            ["name": "get_idea", "description": "One idea with its full notes. Read it before researching so you build on what the user already wrote.",
+             "inputSchema": schema(["id": ["type": "string"]], required: ["id"])],
+            ["name": "add_idea", "description": "Save a project idea to Ideas, with notes. Use it when the user mentions something they might do later.",
+             "inputSchema": schema([
+                "title": ["type": "string"],
+                "notes": ["type": "string", "description": "Markdown. A first line that pitches the idea in one sentence reads best in the list."],
+                "area": ["type": "string", "description": "Area title or id; created if missing."],
+                "stage": ["type": "string", "enum": ["raw", "researching", "ready"]],
+                "tags": todoFields["tags"]!
+             ], required: ["title"])],
+            ["name": "update_idea", "description": "Add research to an idea or change it. Prefer append_notes with a dated Markdown section (## Research, 12 Nov) so the user's own notes stay intact. Concrete next steps written as - [ ] lines become to-dos when the idea is started.",
+             "inputSchema": schema([
+                "id": ["type": "string"],
+                "append_notes": ["type": "string", "description": "Markdown added after the existing notes."],
+                "notes": ["type": "string", "description": "Replaces all notes. Only when the user asks for a rewrite."],
+                "title": ["type": "string"],
+                "stage": ["type": "string", "enum": ["raw", "researching", "ready"]]
+             ], required: ["id"])],
+            ["name": "start_idea", "description": "Turn an idea into a project. Its - [ ] lines become to-dos. Now: an active project with the first step in Today. someday: true parks it in Someday instead. Only when the user says so.",
+             "inputSchema": schema(["id": ["type": "string"], "someday": ["type": "boolean"]], required: ["id"])],
             ["name": "get_project", "description": "A project and its to-dos.",
              "inputSchema": schema(["id": ["type": "string"]], required: ["id"])],
             ["name": "list_areas", "description": "Areas and the projects in them.", "inputSchema": schema([:])],
             ["name": "add_area", "description": "Create an area, a top-level group such as Learning or Work that holds projects. Returns the existing area if one has this title.",
              "inputSchema": schema(["title": ["type": "string"]], required: ["title"])],
             ["name": "list_tags", "description": "All tags in use.", "inputSchema": schema([:])],
+            ["name": "log_time", "description": "Log time the user spent on a to-do (a focus session, a study block). It adds to the to-do's tracked time.",
+             "inputSchema": schema([
+                "id": ["type": "string"],
+                "minutes": ["type": "number"],
+                "start": ["type": "string", "description": "ISO date-time the session started (optional)."],
+                "end": ["type": "string", "description": "ISO date-time it ended (optional; defaults to now)."],
+                "note": ["type": "string"]
+             ], required: ["id"])],
+            ["name": "get_time", "description": "Time tracked: for one to-do or project (pass id), or totals per to-do since a day (pass since: today, monday, 2026-11-01).",
+             "inputSchema": schema(["id": ["type": "string"], "since": ["type": "string"]])],
             ["name": "show_in_things", "description": "Bring Things 4 forward showing a to-do, project or list (today, inbox…).",
              "inputSchema": schema(["id": ["type": "string", "description": "A to-do or project id, or a list name."]], required: ["id"])]
         ]
@@ -164,10 +201,19 @@ enum AgentBridge {
             for (key, value) in args { query[key == "query" ? "q" : key] = "\(value)" }
             return call("GET", "/tasks", query: query)
         case "list_projects": return call("GET", "/projects")
+        case "list_ideas": return call("GET", "/ideas")
+        case "get_idea": return call("GET", "/tasks/\(id)")
+        case "add_idea": return call("POST", "/ideas", body: args)
+        case "update_idea": return call("PATCH", "/tasks/\(id)", body: args.filter { $0.key != "id" })
+        case "start_idea": return call("POST", "/ideas/\(id)/start", body: args.filter { $0.key != "id" })
         case "list_areas": return call("GET", "/areas")
         case "add_area": return call("POST", "/areas", body: args)
         case "list_tags": return call("GET", "/tags")
         case "show_in_things": return call("POST", "/show", body: ["id": args["id"] ?? ""])
+        case "log_time": return call("POST", "/tasks/\(id)/time", body: args.filter { $0.key != "id" })
+        case "get_time":
+            if !id.isEmpty { return call("GET", "/tasks/\(id)/time") }
+            return call("GET", "/time", query: ["since": args["since"] as? String ?? "today"])
         default: return Reply(status: 404, json: ["error": "Unknown tool \(name)."], text: "")
         }
     }
@@ -192,7 +238,7 @@ enum AgentBridge {
                     "protocolVersion": params["protocolVersion"] as? String ?? "2025-06-18",
                     "capabilities": ["tools": ["listChanged": false]],
                     "serverInfo": ["name": "things4", "title": "Things 4", "version": ThingsAPI.version],
-                    "instructions": "Things 4 is the user's to-do app. Use add_todo or add_project to give the user tasks, and get_todo or search_todos (tag: \(source ?? "your name"), completed_since) to see what they finished. Everything you create is tagged “\(source ?? "with your client name")” automatically. Naming a project or area that doesn't exist creates it."
+                    "instructions": "Things 4 is the user's to-do app. Use add_todo or add_project to give the user tasks, list_ideas / get_idea / update_idea to research the projects they're still thinking about, and get_todo or search_todos (tag: \(source ?? "your name"), completed_since) to see what they finished. Everything you create is tagged “\(source ?? "with your client name")” automatically. Naming a project or area that doesn't exist creates it."
                 ]
             case "ping":
                 result = [String: Any]()
@@ -234,6 +280,8 @@ enum AgentBridge {
       things4 search <text> [--status completed] [--tag learning] [--completed-since 2026-11-01]
       things4 get <id>        things4 complete <id>        things4 reopen <id>
       things4 update <id> [--title …] [--when …] [--append-notes …] [--add-tags …] [--completed true]
+      things4 time <id> 40 [--note "…"]   log 40 minutes on a to-do
+      things4 time <id>                   its tracked time     things4 time [--since monday]   totals
       things4 show <id | today | …>     things4 json '[{"type":"to-do","attributes":{"title":"…"}}]'
       things4 mcp             run as an MCP server (stdio) for AI agents
       things4 api             print the API address and token
@@ -322,6 +370,16 @@ enum AgentBridge {
         case "reopen": reply = call("POST", "/tasks/\(encodedFirst)/reopen")
         case "update": reply = call("PATCH", "/tasks/\(encodedFirst)", body: opts)
         case "delete", "trash-item": reply = call("DELETE", "/tasks/\(encodedFirst)")
+        case "time":
+            if positional.count >= 2 {
+                var body = opts
+                body["minutes"] = positional[1]
+                reply = call("POST", "/tasks/\(encodedFirst)/time", body: body)
+            } else if !first.isEmpty {
+                reply = call("GET", "/tasks/\(encodedFirst)/time")
+            } else {
+                reply = call("GET", "/time", query: ["since": opts["since"] as? String ?? "today"])
+            }
         case "projects": reply = call("GET", "/projects")
         case "area": reply = call("POST", "/areas", body: ["title": first])
         case "areas": reply = call("GET", "/areas")
@@ -348,6 +406,20 @@ enum AgentBridge {
             exit(1)
         }
         if raw { print(pretty(reply.json)); exit(0) }
+        if command == "time", let object = reply.json as? [String: Any] {
+            if let task = object["task"] as? [String: Any] {
+                print("Logged \((object["entry"] as? [String: Any])?["minutes"] ?? 0)m on “\(task["title"] ?? "")”, \(task["tracked"] ?? "0m") in total.")
+            } else if let rows = object["tasks"] as? [[String: Any]] {
+                print("\(object["total"] ?? "0m") since \(readable(object["since"] as? String ?? ""))")
+                for row in rows { print("  \(row["tracked"] ?? "")\t\(row["title"] ?? "")  [\(row["id"] ?? "")]") }
+            } else {
+                print("\(object["title"] ?? ""): \(object["tracked"] ?? "0m")")
+                for entry in object["entries"] as? [[String: Any]] ?? [] {
+                    print("  \(readable(entry["start"] as? String ?? ""))  \(entry["minutes"] ?? 0)m" + ((entry["source"] as? String).map { "  · " + $0 } ?? ""))
+                }
+            }
+            exit(0)
+        }
         switch reply.json {
         case let items as [[String: Any]]:
             if items.isEmpty { print("Nothing here.") }

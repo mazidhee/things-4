@@ -5,7 +5,7 @@ import AppKit
 enum Theme {
     private static func dynamic(_ light: NSColor, _ dark: NSColor) -> NSColor {
         NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? DarkTheme.current.adapt(dark) : light
         }
     }
 
@@ -55,8 +55,35 @@ enum Theme {
         case .someday: return dynamic(rgb(0.749, 0.569, 0.396), rgb(0.82, 0.66, 0.48))
         case .logbook: return dynamic(rgb(0.451, 0.741, 0.490), rgb(0.55, 0.80, 0.58))
         case .trash: return dynamic(rgb(0.612, 0.612, 0.639), rgb(0.55, 0.55, 0.58))
+        case .active: return flowColor(.progress)
+        case .ideas: return idea
         }
     }
+
+    static func flowColor(_ flow: Flow) -> NSColor {
+        switch flow {
+        case .backlog: return dynamic(rgb(0.70, 0.72, 0.76), rgb(0.42, 0.43, 0.47))
+        case .todo: return checkboxStroke
+        case .progress: return dynamic(rgb(0.93, 0.62, 0.07), rgb(0.95, 0.72, 0.25))
+        case .waiting: return dynamic(rgb(0.58, 0.40, 0.92), rgb(0.68, 0.56, 0.96))
+        case .done: return accent
+        case .canceled: return dynamic(rgb(0.70, 0.72, 0.76), rgb(0.42, 0.43, 0.47))
+        }
+    }
+
+    /// Ideas: a soft rose, apart from Today's yellow and Waiting's purple.
+    static let idea = dynamic(rgb(0.89, 0.40, 0.58), rgb(0.95, 0.52, 0.68))
+    static func ideaStageColor(_ stage: IdeaStage) -> NSColor {
+        switch stage {
+        case .raw: return flowColor(.backlog)
+        case .researching: return dynamic(rgb(0.30, 0.56, 0.90), rgb(0.45, 0.68, 0.98))
+        case .ready: return success
+        }
+    }
+
+    static let urgent = dynamic(rgb(0.94, 0.38, 0.18), rgb(0.96, 0.47, 0.25))
+    static let boardCard = dynamic(.white, rgb(0.19, 0.19, 0.20))
+    static let boardCardBorder = dynamic(rgb(0.90, 0.91, 0.93), rgb(0.27, 0.27, 0.29))
 
     static let projectColors: [NSColor] = [
         dynamic(rgb(0.322, 0.624, 0.918), rgb(0.42, 0.70, 0.96)),
@@ -194,6 +221,7 @@ extension NSImage {
     /// A tinted SF Symbol. The tint is applied inside a drawing handler so a
     /// dynamic colour resolves correctly whenever the image is drawn.
     static func symbol(_ name: String, size: CGFloat = 15, weight: NSFont.Weight = .medium, color: NSColor = Theme.text) -> NSImage? {
+        if name == "workflow.active" { return WorkflowIcons.flowImage(.progress, size: (size * 1.25).rounded(), square: false) }
         // Things' artwork is drawn on a 28pt canvas with built-in padding; scale so it reads like the symbol size.
         if name == "things.area.plain", let artwork = thingsArtwork(for: "things.area", size: (size * 1.45).rounded()) {
             // Things' sidebar shows the area cube as a grey outline.

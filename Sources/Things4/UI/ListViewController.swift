@@ -199,6 +199,7 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
         openTaskID = (notification.userInfo?["edit"] as? Bool) == true && task.isTodo ? id : nil
         rebuild(preserveScroll: false)
         scrollToRow(id)
+        if task.isIdea && task.isOpen { openPage(for: id) }
     }
 
     private var logTimer: Timer?
@@ -211,6 +212,7 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
     }
 
     @objc private func storeChanged() {
+        animateNextRebuild = true
         rebuild(preserveScroll: true)
         // Completed items linger briefly, then slide off to the Logbook.
         if Preferences.logImmediately, TaskStore.shared.tasks.contains(where: { $0.isCompleted && ($0.completedAt.map { Date().timeIntervalSince($0) < 3 } ?? false) }) {
@@ -314,6 +316,18 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
 
     func rebuild(preserveScroll: Bool) {
         let origin = scrollView.contentView.bounds.origin
+        let animate = animateNextRebuild && Self.animationsEnabled && rowViews.count < 400
+        animateNextRebuild = false
+        var oldFrames: [String: NSRect] = [:]
+        var oldFlows: [String: Flow] = [:]
+        if animate {
+            for (id, view) in rowViews {
+                guard let row = view as? TaskRowView, row.superview === documentView else { continue }
+                oldFrames[id] = row.frame
+                oldFlows[id] = row.task.flow
+            }
+        }
+        defer { if animate { animateMoves(from: oldFrames, flows: oldFlows) } }
         let previousEditor = editor
         reusableEditor = previousEditor
         defer { reusableEditor = nil }
@@ -334,8 +348,13 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
         if !searchQuery.isEmpty {
             buildSearchResults()
         } else {
+            viewOptions = ViewOptions.load(for: selection)
+            let managed = ViewOptions.key(for: selection) != nil
+            wideLayout = managed && viewOptions.layout != .list
+            reorderLocked = managed && !(viewOptions.layout == .list && viewOptions.grouping == .sections)
             updateHeader(for: selection)
             appendTagFilterBar(for: selection)
+            appendWorkflowChrome(for: selection)
             buildBody(for: selection)
         }
 
@@ -361,7 +380,7 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
         // Drop any selection that no longer exists.
         selectedIDs = selectedIDs.filter { orderedIDs.contains($0) }
         if let openTaskID, !orderedIDs.contains(openTaskID) { self.openTaskID = nil }
-        documentView.canReorder = canReorder(selection) && searchQuery.isEmpty
+        documentView.canReorder = canReorder(selection) && searchQuery.isEmpty && !reorderLocked
         refreshSelection()
         layoutBlocks()
 
@@ -424,14 +443,30 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
             buildGrouped(store.tasks(in: selection))
             if store.tasks(in: selection).isEmpty { appendEmptyState(for: selection) }
 
+        case .builtin(.active):
+            let tasks = store.tasks(in: selection)
+            buildWorkflow(tasks, selection: selection, showProject: true)
+            if tasks.isEmpty { appendEmptyState(for: selection) }
+
+        case .builtin(.ideas):
+            buildIdeas(store.ideas)
+
         case .builtin:
             let tasks = store.tasks(in: selection)
             for task in tasks { appendTask(task, showProject: true) }
             appendRecentlyCompleted(store.recentlyCompleted(in: selection), showProject: true)
             if tasks.isEmpty { appendEmptyState(for: selection) }
 
+        case .project(let id) where reorderLocked:
+            appendCompletePrompt(id)
+            buildWorkflow(store.children(of: id).filter(\.isTodo), selection: selection, showProject: false)
+
         case .project(let id):
+            appendCompletePrompt(id)
             buildProject(id)
+
+        case .area(let id) where reorderLocked:
+            buildWorkflow(store.areaTodos(id), selection: selection, showProject: false)
 
         case .area(let id):
             let projects = store.projects(inArea: id).filter(\.isOpen)
@@ -495,6 +530,328 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
 
     private var expandedGroups: Set<String> = []
     private var hiddenLater: Set<String> = []
+
+    // MARK: - Workflow views
+
+    private var viewOptions = ViewOptions(layout: .list, grouping: .sections, filter: .all)
+    /// Board and Table span the window; the list keeps the reading column.
+    private var wideLayout = false
+    /// Grouped, board and table views order to-dos themselves, so dragging does not reorder.
+    private var reorderLocked = false
+    /// Status groups the user has flipped from their default (Done and Canceled start collapsed).
+    private var toggledGroups: Set<String> = []
+    private var animateNextRebuild = false
+    private static let animationsEnabled = !CommandLine.arguments.contains { $0.hasPrefix("--") }
+
+    private func setViewOptions(_ change: (inout ViewOptions) -> Void) {
+        var options = viewOptions
+        change(&options)
+        options.save(for: state.selection)
+        closeEditor()
+        rebuild(preserveScroll: true)
+    }
+
+    /// Chips, progress bar and the List / Board / Table bar under a project, area or Active title.
+    private func appendWorkflowChrome(for selection: Selection) {
+        guard ViewOptions.key(for: selection) != nil else { return }
+        let store = TaskStore.shared
+        func chip(_ flow: Flow, _ count: Int, _ text: String) -> WorkflowStatsView.Chip {
+            .init(image: WorkflowIcons.flowImage(flow, size: 12), strong: "\(count)", text: text)
+        }
+        func focusChip(_ items: [TaskItem]) -> WorkflowStatsView.Chip? {
+            let tracked = store.trackedTotal(items), estimate = store.estimateTotal(items.filter(\.isOpen)) * 60
+            guard tracked >= 60 || estimate > 0 else { return nil }
+            return .init(image: NSImage.symbol("clock", size: 10, weight: .medium, color: Theme.secondary),
+                         strong: Duration.text(seconds: tracked),
+                         text: estimate > 0 ? "focused · \(Duration.text(seconds: estimate)) left to do" : "focused")
+        }
+        switch selection {
+        case .project(let id):
+            guard let project = store.task(id) else { return }
+            let todos = store.children(of: id).filter(\.isTodo)
+            let open = todos.filter(\.isOpen)
+            let counted = todos.filter { !$0.isCanceled }
+            var chips: [WorkflowStatsView.Chip] = []
+            if project.isOpen {
+                let dot = NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
+                    Theme.flowColor(project.stage == .backlog ? .backlog : (project.stage == .waiting ? .progress : .done)).setFill()
+                    NSBezierPath(ovalIn: rect.insetBy(dx: 2.5, dy: 2.5)).fill()
+                    return true
+                }
+                chips.append(.init(image: dot, strong: project.stage.projectTitle, text: "") { anchor in
+                    WorkflowMenus.projectStatus(for: id).popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
+                })
+            }
+            if let deadline = project.deadline {
+                chips.append(.init(image: NSImage.symbol("flag", size: 10, weight: .medium, color: Theme.secondary), strong: deadline.monthDayString, text: "target"))
+            }
+            chips.append(chip(.progress, open.filter { $0.stage == .progress }.count, "in progress"))
+            let waiting = open.filter { $0.stage == .waiting }.count
+            if waiting > 0 { chips.append(chip(.waiting, waiting, "waiting")) }
+            if let focus = focusChip(todos) { chips.append(focus) }
+            let total = Double(max(1, counted.count))
+            let done = counted.filter(\.isCompleted).count
+            let stats = WorkflowStatsView(chips: chips,
+                                          bar: counted.isEmpty ? nil : (Double(done) / total, Double(open.filter { $0.stage == .progress }.count) / total, Double(waiting) / total),
+                                          barLabel: "\(done) of \(counted.count) done")
+            append(block: stats, height: WorkflowStatsView.height(hasBar: !counted.isEmpty), gap: 16)
+        case .area(let id):
+            let todos = store.areaTodos(id)
+            let open = todos.filter(\.isOpen)
+            var chips = [chip(.progress, open.filter { $0.stage == .progress }.count, "in progress"),
+                         chip(.waiting, open.filter { $0.stage == .waiting }.count, "waiting"),
+                         chip(.todo, open.filter { $0.stage == .todo }.count, "up next")]
+            if let focus = focusChip(todos) { chips.append(focus) }
+            append(block: WorkflowStatsView(chips: chips), height: WorkflowStatsView.height(hasBar: false), gap: 16)
+        default:
+            break
+        }
+
+        let bar = ViewOptionsBar(options: viewOptions, showsLayouts: selection != .builtin(.active))
+        bar.onLayout = { [weak self] layout in self?.setViewOptions { $0.layout = layout } }
+        bar.onFilter = { [weak self] anchor in
+            guard let self else { return }
+            let menu = NSMenu()
+            for filter in ListFilter.allCases {
+                menu.addItem(ClosureMenuItem(filter.title, checked: self.viewOptions.filter == filter) { self.setViewOptions { $0.filter = filter } })
+            }
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
+        }
+        bar.onGroup = { [weak self] anchor in
+            guard let self else { return }
+            let menu = NSMenu()
+            for grouping in ViewOptions.groupings(for: selection) {
+                menu.addItem(ClosureMenuItem(grouping.title, checked: self.viewOptions.grouping == grouping) { self.setViewOptions { $0.grouping = grouping } })
+            }
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
+        }
+        append(block: bar, height: 28, gap: 10)
+    }
+
+    /// When the last to-do of a project is done, offer to finish the project too.
+    private func appendCompletePrompt(_ id: String) {
+        let store = TaskStore.shared
+        guard let project = store.task(id), project.isOpen else { return }
+        let todos = store.children(of: id).filter { $0.isTodo && !$0.isCanceled }
+        guard !todos.isEmpty, todos.allSatisfy(\.isCompleted) else { return }
+        append(block: LinkRowView(title: "Every to-do is done. Complete Project") { [weak self] in self?.completeProject(id) }, height: 28, gap: 6)
+    }
+
+    private var taskActions: TaskActions {
+        TaskActions(
+            select: { [weak self] task, event in self?.handleSelect(task, event: event) },
+            open: { task, view in TaskEditorPopover.show(taskID: task.id, from: view) },
+            toggle: { task, alternate in
+                if alternate && task.isOpen { TaskStore.shared.cancel(task.id) } else { TaskStore.shared.toggleCompletion(task.id) }
+            },
+            contextMenu: { [weak self] task, event in self?.showContextMenu(for: task, event: event) },
+            dragIDs: { [weak self] id in
+                guard let self, self.selectedIDs.contains(id) else { return [id] }
+                return self.orderedIDs.filter { self.selectedIDs.contains($0) }
+            })
+    }
+
+    /// A project, area or Active as a grouped list, a board or a table.
+    private func buildWorkflow(_ todos: [TaskItem], selection: Selection, showProject: Bool) {
+        let store = TaskStore.shared
+        let options = viewOptions
+        var items = todos.filter { options.filter.matches($0) }
+        if let tagFilter { items = items.filter { $0.tags.contains(tagFilter) } }
+        let open = items.filter(\.isOpen)
+        let closed = items.filter(\.isCompleted).sorted { ($0.completedAt ?? .distantPast) > ($1.completedAt ?? .distantPast) }
+        func byFlow(_ list: [TaskItem]) -> [TaskItem] {
+            list.sorted { (Flow.listOrder.firstIndex(of: $0.flow) ?? 0, $0.index) < (Flow.listOrder.firstIndex(of: $1.flow) ?? 0, $1.index) }
+        }
+        let key = ViewOptions.key(for: selection) ?? ""
+
+        switch options.layout {
+        case .board:
+            let shown = open + closed.prefix(30)
+            var lanes: [BoardView.Lane] = []
+            if case .area(let id) = selection {
+                for project in store.projects(inArea: id) where project.isOpen {
+                    let tasks = shown.filter { $0.projectID == project.id }
+                    if !tasks.isEmpty { lanes.append(.init(projectID: project.id, title: project.title, tasks: tasks)) }
+                }
+                let loose = shown.filter { $0.projectID == nil }
+                if !loose.isEmpty { lanes.append(.init(projectID: nil, title: "No Project", tasks: loose)) }
+            }
+            if lanes.isEmpty { lanes = [.init(projectID: nil, title: nil, tasks: shown)] }
+            let board = BoardView(lanes: lanes)
+            board.actions = taskActions
+            board.onMove = { ids, flow in store.batch("Set Status") { ids.forEach { store.setFlow($0, flow) } } }
+            board.onAdd = { [weak self] flow in self?.newTask(in: flow) }
+            board.onLane = { [weak self] id in self?.state.selection = .project(id) }
+            for id in board.orderedIDs {
+                orderedIDs.append(id)
+                rowViews[id] = board.cards[id]
+            }
+            append(block: board, height: 300, gap: 0)
+
+        case .table:
+            let table = TaskTableView(tasks: byFlow(open) + closed.prefix(50), showProject: showProject || selection != .builtin(.active) && { if case .area = selection { return true }; return false }())
+            table.actions = taskActions
+            table.onCell = { cell, task, view, rect in
+                let menu: NSMenu
+                switch cell {
+                case .status: menu = WorkflowMenus.status(for: [task.id])
+                case .priority: menu = WorkflowMenus.priority(for: [task.id])
+                case .estimate: menu = WorkflowMenus.estimate(for: [task.id])
+                }
+                menu.popUp(positioning: nil, at: NSPoint(x: rect.minX, y: rect.maxY + 2), in: view)
+            }
+            for id in table.orderedIDs {
+                orderedIDs.append(id)
+                rowViews[id] = table.rows[id]
+            }
+            append(block: table, height: 200, gap: 0)
+
+        case .list:
+            func group(_ id: String, title: String, image: NSImage?, tasks: [TaskItem], startsCollapsed: Bool = false, add: Flow? = nil) {
+                let groupKey = key + ":" + id
+                var collapsed = startsCollapsed != toggledGroups.contains(groupKey)
+                if let openTaskID, tasks.contains(where: { $0.id == openTaskID }) { collapsed = false }
+                let header = StatusGroupHeader(title: title, count: tasks.count, image: image, collapsed: collapsed,
+                                               canAdd: add != nil && showsAddRow(for: selection))
+                header.onToggle = { [weak self] in
+                    guard let self else { return }
+                    if self.toggledGroups.contains(groupKey) { self.toggledGroups.remove(groupKey) } else { self.toggledGroups.insert(groupKey) }
+                    self.rebuild(preserveScroll: true)
+                }
+                header.onAdd = { [weak self] in if let add { self?.newTask(in: add) } }
+                append(block: header, height: 36, gap: 5)
+                if !collapsed { for task in tasks { appendTask(task, showProject: showProject) } }
+                append(block: FlippedView(), height: 16, gap: 0)
+            }
+            switch options.grouping {
+            case .priority:
+                for priority in Priority.allCases.reversed() {
+                    let tasks = byFlow(open.filter { $0.priority == priority })
+                    if !tasks.isEmpty { group("p\(priority.rawValue)", title: priority.title, image: WorkflowIcons.priorityImage(priority), tasks: tasks) }
+                }
+            case .project:
+                let loose = byFlow(open.filter { $0.projectID == nil })
+                var rank: [String: Int] = [:]
+                for (index, project) in (store.projects(inArea: nil) + store.areas.sorted { $0.index < $1.index }.flatMap { store.projects(inArea: $0.id) }).enumerated() {
+                    rank[project.id] = index
+                }
+                let projectIDs = Array(Set(open.compactMap(\.projectID))).sorted { (rank[$0] ?? .max) < (rank[$1] ?? .max) }
+                for projectID in projectIDs {
+                    let header = GroupHeaderView(title: store.task(projectID)?.title ?? "Project", projectID: projectID, color: Theme.accent)
+                    header.onClick = { [weak self] in self?.state.selection = .project(projectID) }
+                    append(block: header, height: 44, gap: 6)
+                    for task in byFlow(open.filter { $0.projectID == projectID }) { appendTask(task, showProject: false) }
+                    append(block: FlippedView(), height: 18, gap: 0)
+                }
+                if !loose.isEmpty { group("loose", title: "No Project", image: nil, tasks: loose) }
+            case .none:
+                for task in byFlow(open) { appendTask(task, showProject: showProject) }
+            default:
+                let active = selection == .builtin(.active)
+                // Like Things, a to-do finished today stays where it was, greyed out; it joins Done tomorrow.
+                let recentIDs = Set((active ? store.recentlyCompleted(in: selection) : closed.filter { ($0.completedAt ?? .distantPast) >= (Preferences.logImmediately ? Date().addingTimeInterval(-2.5) : Date().startOfDay) }).map(\.id))
+                let recent = (active ? store.recentlyCompleted(in: selection) : closed).filter { recentIDs.contains($0.id) }
+                for flow in active ? [Flow.progress, .waiting] : Flow.listOrder {
+                    let tasks = flow.stage == nil ? Array(closed.filter { $0.flow == flow && !recentIDs.contains($0.id) }.prefix(60))
+                        : open.filter { $0.flow == flow } + recent.filter { $0.stage == flow.stage }
+                    let isProject: Bool = { if case .project = selection { return true }; return false }()
+                    guard !tasks.isEmpty || (isProject && flow == .todo) else { continue }
+                    group(flow.rawValue, title: flow.title, image: WorkflowIcons.flowImage(flow), tasks: tasks,
+                          startsCollapsed: flow.stage == nil, add: flow.stage == nil ? nil : flow)
+                }
+            }
+        }
+    }
+
+    /// Ideas grouped by how far they've been thought through, nearest to ready first.
+    private func buildIdeas(_ ideas: [TaskItem]) {
+        guard !ideas.isEmpty else {
+            appendEmptyState(for: .builtin(.ideas))
+            return
+        }
+        for stage in IdeaStage.allCases.reversed() {
+            let group = ideas.filter { $0.ideaStage == stage }
+            guard !group.isEmpty else { continue }
+            let groupKey = "ideas:" + stage.rawValue
+            let collapsed = toggledGroups.contains(groupKey)
+            let header = StatusGroupHeader(title: stage.title, count: group.count, image: IdeaIcons.stageImage(stage),
+                                           collapsed: collapsed, canAdd: true)
+            header.onToggle = { [weak self] in
+                guard let self else { return }
+                if self.toggledGroups.contains(groupKey) { self.toggledGroups.remove(groupKey) } else { self.toggledGroups.insert(groupKey) }
+                self.rebuild(preserveScroll: true)
+            }
+            header.onAdd = { [weak self] in self?.newIdea(stage: stage) }
+            append(block: header, height: 36, gap: 5)
+            if !collapsed {
+                for idea in group { appendIdea(idea) }
+            }
+            append(block: FlippedView(), height: 16, gap: 0)
+        }
+    }
+
+    private func appendIdea(_ idea: TaskItem) {
+        let row = IdeaRowView(idea: idea)
+        row.isSelectedRow = selectedIDs.contains(idea.id)
+        row.onSelect = { [weak self] idea, event in self?.handleSelect(idea, event: event) }
+        row.onOpen = { [weak self] idea in self?.openPage(for: idea.id) }
+        row.onContextMenu = { [weak self, weak row] idea, event in
+            guard let self, let row else { return }
+            if !self.selectedIDs.contains(idea.id) { self.selectOnly(idea.id) }
+            let menu = IdeaActions.contextMenu(for: idea.id) { [weak self] in self?.openPage(for: idea.id) }
+            NSMenu.popUpContextMenu(menu, with: event, for: row)
+        }
+        rowViews[idea.id] = row
+        orderedIDs.append(idea.id)
+        append(block: row, height: IdeaRowView.height, gap: 0)
+    }
+
+    /// Creates an idea and opens it as a page, title selected.
+    func newIdea(stage: IdeaStage = .raw) {
+        let idea = TaskStore.shared.createIdea(title: "", stage: stage)
+        openPage(for: idea.id)
+    }
+
+    /// A new to-do in this view that starts in the given status.
+    private func newTask(in flow: Flow) {
+        guard showsAddRow(for: state.selection) else { return }
+        if let open = openTaskID { editor?.commitAll(); discardIfUntouched(open) }
+        let task = makeTask(title: "New To-Do")
+        if let stage = flow.stage, stage != .todo { TaskStore.shared.setStage(task.id, stage) }
+        present(newTaskID: task.id)
+    }
+
+    /// Opens a just-created to-do: inline in a list, in a popover on a board or table.
+    private func present(newTaskID id: String) {
+        selectedIDs = [id]
+        anchorID = id
+        if wideLayout {
+            openTaskID = nil
+            rebuild(preserveScroll: true)
+            if let view = rowViews[id] { TaskEditorPopover.show(taskID: id, from: view) }
+            return
+        }
+        openTaskID = id
+        pendingFocus = .title
+        rebuild(preserveScroll: true)
+        scrollToRow(id)
+    }
+
+    private func animateMoves(from oldFrames: [String: NSRect], flows: [String: Flow]) {
+        guard !oldFrames.isEmpty else { return }
+        for (id, view) in rowViews {
+            guard let row = view as? TaskRowView, row.superview === documentView, let old = oldFrames[id] else { continue }
+            if let flow = flows[id], flow != row.task.flow { row.checkbox.pop() }
+            let target = row.frame
+            guard abs(old.minY - target.minY) > 1 else { continue }
+            row.frame = NSRect(x: target.minX, y: old.minY, width: target.width, height: target.height)
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.3
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+                row.animator().frame = target
+            }
+        }
+    }
     /// Things' tag filter bar: nil = All.
     private var tagFilter: String?
 
@@ -624,6 +981,11 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
         append(block: header, height: 80, gap: 12)
         let projects = results.filter(\.isProject)
         let todos = results.filter(\.isTodo)
+        let ideas = results.filter { $0.isIdea && $0.isOpen }
+        if !ideas.isEmpty {
+            append(block: SectionHeaderView(title: "Ideas"), height: 28, gap: 2)
+            for idea in ideas { appendIdea(idea) }
+        }
         if !projects.isEmpty {
             append(block: SectionHeaderView(title: "Projects"), height: 28, gap: 2)
             for project in projects { appendTask(project, showProject: true, navigateOnSelect: true) }
@@ -850,14 +1212,18 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
         blocks.append(Block(view: block, height: height, gap: gap))
     }
 
+    private func column(in width: CGFloat) -> (x: CGFloat, width: CGFloat) {
+        wideLayout && searchQuery.isEmpty ? (36, max(280, width - 72)) : Layout.column(in: width)
+    }
+
     private var contentWidth: CGFloat {
-        Layout.column(in: scrollView.contentSize.width).width
+        column(in: scrollView.contentSize.width).width
     }
 
     private func layoutBlocks() {
         let scrollWidth = scrollView.contentSize.width
         guard scrollWidth > 10 else { return }
-        let (x, contentWidth) = Layout.column(in: scrollWidth)
+        let (x, contentWidth) = column(in: scrollWidth)
         var y: CGFloat = 9
         var slots: [ListDocumentView.Slot] = []
 
@@ -872,6 +1238,7 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
             var height = block.height
             if let editor = block.view as? TaskEditorView { height = editor.preferredHeight(width: contentWidth) }
             if let header = block.view as? ListHeaderView, header === projectHeader?.view { height = header.preferredHeight(width: contentWidth) }
+            if let wide = block.view as? WideBlock { height = wide.preferredHeight(width: contentWidth) }
             let extra = (block.view as? CalendarEventsView)?.extendsLeft ?? 0
             block.view.frame = NSRect(x: x - extra, y: y, width: contentWidth + extra + (extra > 0 ? 3 : 0), height: height)
             block.view.needsLayout = true
@@ -893,6 +1260,9 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
         for (id, view) in rowViews {
             if let row = view as? TaskRowView { row.isSelectedRow = selectedIDs.contains(id) }
             if let row = view as? HeadingRowView { row.isSelectedRow = selectedIDs.contains(id) }
+            if let card = view as? BoardCardView { card.isSelectedCard = selectedIDs.contains(id) }
+            if let row = view as? TableRowView { row.isSelectedRow = selectedIDs.contains(id) }
+            if let row = view as? IdeaRowView { row.isSelectedRow = selectedIDs.contains(id) }
         }
         toolbar.setSelectionActive(!selectedIDs.isEmpty)
         toolbar.setEditing(openTaskID != nil)
@@ -901,7 +1271,7 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
 
     private func scrollToRow(_ id: String) {
         guard let row = rowViews[id] else { return }
-        var frame = row.superview == nil ? .zero : row.frame
+        var frame = row.superview == nil ? .zero : row.convert(row.bounds, to: documentView)
         if let editor, openTaskID == id { frame = frame == .zero ? editor.frame : frame.union(editor.frame) }
         documentView.scrollToVisible(frame.insetBy(dx: 0, dy: -8))
     }
@@ -914,6 +1284,7 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
         guard let spec = Preferences.todayCover else {
             let reveal = AddCoverReveal(frame: .zero)
             reveal.onAdd = { Preferences.todayCover = Covers.randomSpec() }
+            reveal.trailingInset = header.actionWidth
             header.addSubview(reveal)
             return
         }
@@ -938,6 +1309,16 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
                                         color: Theme.listColor(list), symbol: list.symbol,
                                         actionTitle: "Empty Trash", actionSymbol: "trash")
                 header.onAction = { [weak self] in self?.emptyTrashAction(nil) }
+            } else if list == .today {
+                header = ListHeaderView(title: list.title, subtitle: subtitle, notes: "", progress: nil,
+                                        color: Theme.listColor(list), symbol: list.symbol,
+                                        actionTitle: "Plan My Day", actionSymbol: "waveform")
+                header.onAction = { PlanDayWindowController.shared.show() }
+            } else if list == .ideas {
+                header = ListHeaderView(title: list.title, subtitle: subtitle, notes: "", progress: nil,
+                                        color: Theme.listColor(list), symbol: list.symbol,
+                                        actionTitle: "New Idea", actionSymbol: "plus")
+                header.onAction = { [weak self] in self?.newIdea() }
             } else {
                 header = ListHeaderView(title: list.title, subtitle: subtitle, notes: "",
                                         progress: nil, color: Theme.listColor(list), symbol: list.symbol)
@@ -1116,6 +1497,7 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
         case .builtin(.upcoming): return "Nothing scheduled."
         case .builtin(.logbook): return "The Logbook is empty."
         case .builtin(.trash): return "Trash is empty."
+        case .builtin(.ideas): return "No ideas yet."
         case .project: return "No to-dos yet."
         default: return "No to-dos here."
         }
@@ -1129,6 +1511,7 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
         case .builtin(.today): return "Move a to-do here with ⌘T, or enjoy the rest of the day."
         case .builtin(.upcoming): return "Give a to-do a start date and it will appear here."
         case .builtin(.logbook): return "Completed and canceled to-dos end up here."
+        case .builtin(.ideas): return "Keep projects you haven't committed to here, with their notes and research. Press ⌘N for a new idea."
         case .project: return "Add to-dos below, or press ⇧⌘N for a heading."
         default: return "Anything you add shows up in this list."
         }
@@ -1144,7 +1527,7 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
 
     private func canReorder(_ selection: Selection) -> Bool {
         switch selection {
-        case .builtin(.logbook), .builtin(.trash), .builtin(.upcoming): return false
+        case .builtin(.logbook), .builtin(.trash), .builtin(.upcoming), .builtin(.ideas): return false
         default: return true
         }
     }
@@ -1212,7 +1595,7 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
 
     /// The full-page Markdown note for a to-do.
     private func openPage(for id: String) {
-        guard let task = TaskStore.shared.task(id), task.isTodo || task.isProject else { return }
+        guard let task = TaskStore.shared.task(id), task.isTodo || task.isProject || task.isIdea else { return }
         editor?.commitAll()
         selectedIDs = [id]
         anchorID = id
@@ -1227,6 +1610,11 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
 
     private func openEditor(for id: String) {
         guard let task = TaskStore.shared.task(id), !task.isProject, !task.isHeading else { return }
+        if wideLayout, searchQuery.isEmpty {
+            selectOnly(id)
+            if let view = rowViews[id] { TaskEditorPopover.show(taskID: id, from: view) }
+            return
+        }
         editor?.commitAll()
         openTaskID = id
         selectedIDs = [id]
@@ -1335,6 +1723,10 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
             if selectedIDs.isEmpty { focusQuickAdd() } else { newTaskBelow(nil) }
         case 127, NSDeleteFunctionKey: // Delete
             deleteSelected(nil)
+        case 115 where flags.subtracting(.capsLock).isEmpty && !selectedTodoIDs.isEmpty && openTaskID == nil: // S
+            showStatus(nil)
+        case 112 where flags.subtracting(.capsLock).isEmpty && !selectedTodoIDs.isEmpty && openTaskID == nil: // P
+            showPriority(nil)
         default:
             // Typing with the list focused starts a new to-do, so keystrokes are never lost.
             if flags.subtracting([.shift, .capsLock]).isEmpty, let text = event.characters, !text.isEmpty,
@@ -1370,6 +1762,8 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
         }
         if task.isProject {
             state.selection = .project(task.id)
+        } else if task.isIdea {
+            openPage(for: task.id)
         } else if task.isHeading {
             if let title = Prompt.text(title: "Rename Heading", message: "", placeholder: "Heading", initial: task.title, button: "Rename") {
                 TaskStore.shared.setTitle(task.id, title)
@@ -1389,16 +1783,35 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
 
     @objc func newTaskBelow(_ sender: Any?) {
         let selection = state.selection
+        if selection == .builtin(.ideas) { newIdea(); return }
         guard showsAddRow(for: selection) else { return }
         let anchor = selectedOrdered.last ?? openTaskID
         if let open = openTaskID { editor?.commitAll(); discardIfUntouched(open) }
-        let task = makeTask(title: "New To-Do", afterTaskID: TaskStore.shared.task(anchor ?? "") == nil ? nil : anchor)
-        openTaskID = task.id
-        pendingFocus = .title
-        selectedIDs = [task.id]
-        anchorID = task.id
-        rebuild(preserveScroll: true)
-        scrollToRow(task.id)
+        let anchorTask = anchor.flatMap { TaskStore.shared.task($0) }
+        let task = makeTask(title: "New To-Do", afterTaskID: anchorTask == nil ? nil : anchor)
+        // In a status view, a to-do added under a selected one joins its group.
+        if reorderLocked, let anchorTask, anchorTask.isTodo, anchorTask.isOpen, anchorTask.stage != .todo, selection != .builtin(.active) {
+            TaskStore.shared.setStage(task.id, anchorTask.stage)
+        }
+        present(newTaskID: task.id)
+    }
+
+    @objc func showStatus(_ sender: Any?) {
+        let ids = openTaskID.map { [$0] } ?? selectedTodoIDs
+        guard !ids.isEmpty else { return }
+        popUp(WorkflowMenus.status(for: ids) { [weak self] in self?.afterChange() }, from: sender)
+    }
+
+    @objc func showPriority(_ sender: Any?) {
+        let ids = openTaskID.map { [$0] } ?? selectedTodoIDs
+        guard !ids.isEmpty else { return }
+        popUp(WorkflowMenus.priority(for: ids) { [weak self] in self?.afterChange() }, from: sender)
+    }
+
+    @objc func showEstimate(_ sender: Any?) {
+        let ids = openTaskID.map { [$0] } ?? selectedTodoIDs
+        guard !ids.isEmpty else { return }
+        popUp(WorkflowMenus.estimate(for: ids) { [weak self] in self?.afterChange() }, from: sender)
     }
 
     @objc func newHeadingAction(_ sender: Any?) {
@@ -1682,6 +2095,13 @@ final class ListViewController: NSViewController, NSSearchFieldDelegate, NSMenuI
                                         areaID: anchorTask?.areaID, afterTaskID: anchorTask?.id)
             case .logbook, .trash:
                 return store.createTask(title: title, bucket: .inbox)
+            case .ideas:
+                return store.createIdea(title: title)
+            case .active:
+                let task = store.createTask(title: title, bucket: .anytime, projectID: anchorTask?.projectID,
+                                            areaID: anchorTask?.areaID, afterTaskID: anchorTask?.id)
+                store.setStage(task.id, .progress)
+                return store.task(task.id) ?? task
             }
         case .project(let id):
             let project = store.task(id)

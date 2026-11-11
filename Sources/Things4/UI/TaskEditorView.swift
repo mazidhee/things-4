@@ -61,6 +61,9 @@ final class TaskEditorView: FlippedView, NSTextFieldDelegate, NSTextViewDelegate
     private let breadcrumb = FlatButton(title: "", symbol: nil, color: Theme.secondary, fontSize: 12.5)
     private var whenChip: ChipButton?
     private var deadlineChip: ChipButton?
+    private var timeChip: ChipButton?
+    /// Status, priority and estimate share one row.
+    private var flowChips: [ChipButton] = []
     private var repeatChip: ChipButton?
     private var checklistRows: [NSView] = []
     private var checklistFields: [NSTextField] = []
@@ -217,7 +220,7 @@ final class TaskEditorView: FlippedView, NSTextFieldDelegate, NSTextViewDelegate
         return height + Self.breadcrumbHeight
     }
 
-    private var valueRowCount: Int { [whenChip, deadlineChip, repeatChip].compactMap { $0 }.count }
+    private var valueRowCount: Int { [whenChip, deadlineChip, repeatChip, timeChip].compactMap { $0 }.count + (flowChips.isEmpty ? 0 : 1) }
 
     static func height(for task: TaskItem, width: CGFloat) -> CGFloat {
         let probe = TaskEditorView(task: task)
@@ -236,6 +239,33 @@ final class TaskEditorView: FlippedView, NSTextFieldDelegate, NSTextViewDelegate
         whenChip?.removeFromSuperview(); whenChip = nil
         deadlineChip?.removeFromSuperview(); deadlineChip = nil
         repeatChip?.removeFromSuperview(); repeatChip = nil
+        timeChip?.removeFromSuperview(); timeChip = nil
+        flowChips.forEach { $0.removeFromSuperview() }
+        flowChips = []
+        if task.isTodo, task.status != .trashed {
+            let id = task.id
+            func add(_ title: String, image: NSImage?, detail: String? = nil, dim: Bool = false, menu: @escaping () -> NSMenu) {
+                var chip: ChipButton?
+                chip = ChipButton(title: title, symbol: "circle", color: Theme.secondary, detail: detail,
+                                  titleColor: dim ? Theme.secondary : Theme.text, image: image) {
+                    guard let chip else { return }
+                    menu().popUp(positioning: nil, at: NSPoint(x: 0, y: chip.bounds.height + 4), in: chip)
+                }
+                addSubview(chip!)
+                flowChips.append(chip!)
+            }
+            let reload: () -> Void = { [weak self] in self?.onReload?() }
+            add(task.flow.title, image: WorkflowIcons.flowImage(task.flow), detail: TaskStore.shared.waitingLabel(task)) {
+                WorkflowMenus.status(for: [id], done: reload)
+            }
+            add(task.priority == .none ? "Priority" : task.priority.title, image: WorkflowIcons.priorityImage(task.priority), dim: task.priority == .none) {
+                WorkflowMenus.priority(for: [id], done: reload)
+            }
+            add(task.estimate > 0 ? Duration.text(seconds: task.estimate * 60) + " estimate" : "Estimate",
+                image: NSImage.symbol("hourglass", size: 12, weight: .medium, color: Theme.secondary), dim: task.estimate == 0) {
+                WorkflowMenus.estimate(for: [id], done: reload)
+            }
+        }
 
         if task.isEvening || task.startDate != nil || task.bucket == .someday {
             let title: String
@@ -267,6 +297,17 @@ final class TaskEditorView: FlippedView, NSTextFieldDelegate, NSTextViewDelegate
             }
             addSubview(chip)
             repeatChip = chip
+        }
+        let tracked = TaskStore.shared.trackedTime(task.id)
+        if tracked >= 60 {
+            let sessions = TaskStore.shared.timeEntries(for: task.id).count
+            let chip = ChipButton(title: "Focused " + Duration.text(seconds: tracked), symbol: "timer", color: Theme.accent,
+                                  detail: sessions == 1 ? "1 session" : "\(sessions) sessions", titleColor: Theme.text) { [weak self] in
+                guard let self, let chip = self.timeChip else { return }
+                TaskMenus.timeMenu(for: self.task).popUp(positioning: nil, at: NSPoint(x: 0, y: chip.bounds.height + 4), in: chip)
+            }
+            addSubview(chip)
+            timeChip = chip
         }
         if let projectID = task.projectID, let project = TaskStore.shared.task(projectID) {
             breadcrumb.title = project.title + "  ›"
@@ -426,8 +467,17 @@ final class TaskEditorView: FlippedView, NSTextFieldDelegate, NSTextViewDelegate
         }
 
         let cardBottom = bounds.height - Self.breadcrumbHeight
-        let rows = [whenChip, deadlineChip, repeatChip].compactMap { $0 }
-        var rowY = cardBottom - 12 - CGFloat(max(1, rows.count)) * 28
+        let rows = [whenChip, deadlineChip, repeatChip, timeChip].compactMap { $0 }
+        var rowY = cardBottom - 12 - CGFloat(max(1, rows.count + (flowChips.isEmpty ? 0 : 1))) * 28
+        if !flowChips.isEmpty {
+            var chipX = x - 4
+            for chip in flowChips {
+                let chipWidth = chip.intrinsicContentSize.width
+                chip.frame = NSRect(x: chipX, y: rowY + 2, width: chipWidth, height: 24)
+                chipX += chipWidth + 4
+            }
+            rowY += 28
+        }
         for chip in rows {
             chip.frame = NSRect(x: x - 4, y: rowY + 2, width: chip.intrinsicContentSize.width, height: 24)
             rowY += 28
@@ -643,11 +693,11 @@ final class ChipButton: NSButton {
     private var hovering = false { didSet { needsDisplay = true } }
 
     init(title: String, symbol: String, color: NSColor, detail: String? = nil, titleColor: NSColor = Theme.text,
-         handler: @escaping () -> Void) {
+         image: NSImage? = nil, handler: @escaping () -> Void) {
         self.handler = handler
         self.detail = detail
         self.titleColor = titleColor
-        symbolImage = NSImage.symbol(symbol, size: 13, weight: .semibold, color: color)
+        symbolImage = image ?? NSImage.symbol(symbol, size: 13, weight: .semibold, color: color)
         super.init(frame: .zero)
         self.title = title
         isBordered = false

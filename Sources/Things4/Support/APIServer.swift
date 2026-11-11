@@ -198,6 +198,15 @@ final class APIServer {
                 return .ok(ThingsAPI.encode(try ThingsAPI.complete(parts[1])))
             case ("POST", "tasks", 3) where parts[2] == "reopen":
                 return .ok(ThingsAPI.encode(try ThingsAPI.update(["id": parts[1], "completed": false])))
+            case ("POST", "tasks", 3) where parts[2] == "time":
+                return HTTPResponse(status: 201, body: try ThingsAPI.logTime(parts[1], object, source: source))
+            case ("GET", "tasks", 3) where parts[2] == "time":
+                return .ok(try ThingsAPI.time(parts[1]))
+            case ("GET", "time", 1):
+                return .ok(try ThingsAPI.timeReport(request.query))
+            case ("DELETE", "time", 2):
+                TaskStore.shared.deleteTimeEntry(parts[1])
+                return .ok(["ok": true])
             case ("DELETE", "tasks", 2):
                 return .ok(ThingsAPI.encode(try ThingsAPI.trash(parts[1])))
             case ("GET", "projects", 1):
@@ -209,6 +218,12 @@ final class APIServer {
                 return .ok(out)
             case ("POST", "projects", 1):
                 return HTTPResponse(status: 201, body: try ThingsAPI.addProject(withSource(object)).map(ThingsAPI.encode))
+            case ("GET", "ideas", 1):
+                return .ok(TaskStore.shared.ideas.map(ThingsAPI.encode))
+            case ("POST", "ideas", 1):
+                return HTTPResponse(status: 201, body: ThingsAPI.encode(try ThingsAPI.addIdea(withSource(object))))
+            case ("POST", "ideas", 3) where parts[2] == "start":
+                return .ok(ThingsAPI.encode(try ThingsAPI.startIdea(parts[1], someday: ThingsAPI.bool(object, "someday") == true)))
             case ("GET", "areas", 1):
                 return .ok(ThingsAPI.areas())
             case ("POST", "areas", 1):
@@ -247,8 +262,12 @@ final class APIServer {
             "GET /v1/tasks?q=&status=open|completed|canceled|all&tags=&list=&completed-since=&modified-since=&limit=",
             "POST /v1/tasks  {title | titles, notes, when, deadline, reminder, tags, checklist-items, list, area, heading, source, completed}  (or an array)",
             "GET /v1/tasks/{id}",
+            "GET /v1/ideas · POST /v1/ideas {title, notes, area, stage: raw|researching|ready, tags} · POST /v1/ideas/{id}/start {someday}",
+            "PATCH /v1/tasks/{idea id} {append-notes, notes, title, stage} edits an idea",
             "PATCH /v1/tasks/{id}  {title, notes, prepend-notes, append-notes, when, deadline, reminder, tags, add-tags, checklist-items, append-checklist-items, list, heading, completed, canceled}",
             "POST /v1/tasks/{id}/complete · POST /v1/tasks/{id}/reopen · DELETE /v1/tasks/{id} (moves to Trash)",
+            "POST /v1/tasks/{id}/time {minutes | seconds | start+end, start, end, note} logs focused time · GET /v1/tasks/{id}/time lists it (a project's includes its to-dos) · tasks carry tracked_minutes",
+            "GET /v1/time?since=today|monday|2026-11-01 totals time by to-do · DELETE /v1/time/{entry id}",
             "GET /v1/projects · GET /v1/projects/{id} · POST /v1/projects {title, notes, area, when, deadline, tags, to-dos: [string | {title, notes, …} | {type: heading, title}]}",
             "GET /v1/areas · POST /v1/areas {title} · GET /v1/tags",
             "Header X-Things-Source: <agent name> (or a source field) tags new items with that name and notes “Added by …”. A list or area that doesn't exist yet is created.",

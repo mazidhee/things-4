@@ -133,7 +133,9 @@ final class ListHeaderView: FlippedView, NSTextViewDelegate {
     private let ring = ProgressRing()
     private let iconView = NSImageView()
     private let menuButton = IconButton(symbol: "ellipsis", size: 19, color: Theme.secondary, tooltip: "More")
-    private let actionButton = FlatButton(title: "", symbol: nil, color: Theme.secondary, fontSize: 11.5)
+    private let actionButton = FlatButton(title: "", symbol: nil, color: Theme.secondary, fontSize: 12)
+    /// Width the action button takes at the right edge, so nothing else is placed over it.
+    var actionWidth: CGFloat { actionButton.isHidden ? 0 : ceil(actionButton.intrinsicContentSize.width) }
     let notesView = MarkdownTextView()
 
     private let showsNotes: Bool
@@ -194,7 +196,7 @@ final class ListHeaderView: FlippedView, NSTextViewDelegate {
         if let actionTitle {
             actionButton.title = actionTitle
             if let actionSymbol {
-                actionButton.image = NSImage.symbol(actionSymbol, size: 11, weight: .medium, color: Theme.secondary)
+                actionButton.image = NSImage.symbol(actionSymbol, size: 12, weight: .medium, color: Theme.secondary)
                 actionButton.imagePosition = .imageLeading
             }
             actionButton.target = self
@@ -258,13 +260,14 @@ final class ListHeaderView: FlippedView, NSTextViewDelegate {
             iconView.frame = NSRect(x: -3, y: 8, width: 30, height: 30)
             x = 28
         }
-        let rightSpace: CGFloat = actionButton.isHidden ? 0 : 130
+        let rightSpace: CGFloat = actionButton.isHidden ? 0 : actionWidth + 12
         let titleWidth = min(titleLabel.fittingWidth + 4, width - x - rightSpace - 34)
         titleLabel.frame = NSRect(x: x, y: 8, width: titleWidth, height: 30)
         menuButton.frame = NSRect(x: x + titleWidth + 2, y: 12, width: 30, height: 22)
         subtitleLabel.frame = NSRect(x: x, y: 44, width: width - x - rightSpace, height: 17)
         if !actionButton.isHidden {
-            actionButton.frame = NSRect(x: width - 124, y: 14, width: 120, height: 22)
+            // Sized to its content so the icon sits next to the label and the label ends at the column edge.
+            actionButton.frame = NSRect(x: width - actionWidth, y: 13, width: actionWidth, height: 24)
         }
         if showsNotes {
             let height = max(22, notesView.contentHeight(for: width - 4))
